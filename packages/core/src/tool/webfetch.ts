@@ -5,13 +5,13 @@ import { Duration, Effect, Layer, Schema } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { Parser } from "htmlparser2"
 import { PermissionV2 } from "../permission"
-import { convertHTMLToMarkdown } from "./html-markdown"
+import { convertHTMLToMarkdown, MAX_MARKDOWN_BYTES } from "./html-markdown"
 import { collectBoundedResponseBody } from "./http-body"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 
 export const name = "webfetch"
-export const MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+export const MAX_RESPONSE_BYTES = MAX_MARKDOWN_BYTES
 export const DEFAULT_TIMEOUT_SECONDS = 30
 export const MAX_TIMEOUT_SECONDS = 120
 
