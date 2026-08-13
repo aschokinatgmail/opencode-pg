@@ -176,12 +176,12 @@ const root = LayerNode.group([
   CrossSpawnSpawner.node,
 ])
 const replacements = [
-  LayerNode.replace(SessionSummary.layer, summary),
-  LayerNode.replace(RuntimeFlags.defaultLayer, RuntimeFlags.layer({ experimentalEventSystem: true })),
-]
-const env = LayerNode.buildLayer(
+  [SessionSummary.node, summary],
+  [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
+] as const
+const env = LayerNode.compile(
   LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
-  { replacements },
+  replacements,
 )
 
 const it = testEffect(env)
@@ -206,9 +206,7 @@ const providerErrorLLM = Layer.succeed(
       ),
   }),
 )
-const providerErrorEnv = LayerNode.buildLayer(root, {
-  replacements: [...replacements, LayerNode.replace(LLM.layer, providerErrorLLM)],
-})
+const providerErrorEnv = LayerNode.compile(root, [...replacements, [LLM.node, providerErrorLLM]])
 const itProviderError = testEffect(providerErrorEnv)
 
 const fragmentFailureLLM = Layer.succeed(
@@ -225,9 +223,7 @@ const fragmentFailureLLM = Layer.succeed(
       ),
   }),
 )
-const fragmentFailureEnv = LayerNode.buildLayer(root, {
-  replacements: [...replacements, LayerNode.replace(LLM.layer, fragmentFailureLLM)],
-})
+const fragmentFailureEnv = LayerNode.compile(root, [...replacements, [LLM.node, fragmentFailureLLM]])
 const itFragmentFailure = testEffect(fragmentFailureEnv)
 
 const boot = Effect.fn("test.boot")(function* () {
@@ -594,6 +590,53 @@ it.live("session.processor effect tests retry recognized structured json errors"
           agent: agent(),
           system: [],
           messages: [{ role: "user", content: "retry json" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(2)
+        expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
+        expect(handle.message.error).toBeUndefined()
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor effect tests retry OpenAI-compatible midstream server errors", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.push(raw({ chunks: [{ error: { type: "server_error", code: "server_error", message: "xxx" } }] }))
+        yield* llm.text("after")
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "retry midstream server error")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "retry midstream server error" }],
           tools: {},
         })
 
