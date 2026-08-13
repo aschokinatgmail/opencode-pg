@@ -32,8 +32,8 @@ export function createTimelineProjection(input: {
     })
     return result
   })
-  const projection = createMemo(() =>
-    Timeline.constructSessionMessageRows(
+  const projection = createMemo(() => {
+    return Timeline.constructSessionMessageRows(
       input.sessionMessages(),
       (messageID) => messageByID().get(messageID) as UserMessage | AssistantMessage | undefined,
       input.parts,
@@ -41,8 +41,8 @@ export function createTimelineProjection(input: {
       input.status().type,
       input.inlineComments(),
       input.userMessages(),
-    ),
-  )
+    )
+  })
   const activeMessageID = createMemo(() => projection().activeMessageID)
   const rows = createMemo((previous: TimelineRow.TimelineRow[] | undefined) =>
     reuseTimelineRows(previous, projection().rows),

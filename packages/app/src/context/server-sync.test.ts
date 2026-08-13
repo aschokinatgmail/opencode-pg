@@ -188,6 +188,18 @@ function sessionInfo(id: string) {
   } as SessionInfo
 }
 
+function sessionAt(directory: string): SessionInfo {
+  return {
+    id: "session",
+    projectID: "project",
+    location: { directory },
+    title: "Session",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 1, updated: 1 },
+  }
+}
+
 describe("estimateRootSessionTotal", () => {
   test("keeps exact total for full fetches", () => {
     expect(estimateRootSessionTotal({ count: 42, limit: 10, limited: false })).toBe(42)

@@ -43,7 +43,6 @@ export namespace TimelineRow {
   export class Retry extends Data.TaggedClass("Retry")<{
     userMessageID: string
   }> {}
-
   export type TimelineRow =
     | TurnGap
     | CommentStrip

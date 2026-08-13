@@ -72,7 +72,7 @@ describe("current event buffering", () => {
         type: "session.tool.input.delta",
         location: { directory: "/repo" },
         data: { sessionID: "ses", assistantMessageID: "msg", id, delta },
-      } as OpenCodeEvent)
+      } satisfies Extract<OpenCodeEvent, { type: "session.tool.input.delta" }>)
     const result = coalesceServerEvents([
       { directory: "/repo", payload: current("evt_1", "call_1", "{") },
       { directory: "/repo", payload: current("evt_2", "call_1", "}") },

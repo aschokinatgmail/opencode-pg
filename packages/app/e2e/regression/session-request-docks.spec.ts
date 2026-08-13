@@ -116,7 +116,7 @@ test("restores the draft caret before typing after a request dock closes", async
   })
   await mockServer(page, { forms: [] })
   await page.goto(`/${base64Encode(directory)}/session/${sessionID}`)
-  await transport.waitForConnection()
+  await transport.waitForConnection({ path: "/api/event" })
   await expectSessionTitle(page, title)
 
   const editor = page.locator('[data-component="prompt-input"][contenteditable="true"]')
