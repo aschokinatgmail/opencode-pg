@@ -1,7 +1,7 @@
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventManifest } from "@/event-manifest"
-import { InstanceDisposed } from "@/server/event"
+import { InstanceDisposed, InstanceReloaded } from "@/server/event"
 import "@opencode-ai/core/account"
 import "@/server/event"
 import { Schema } from "effect"
@@ -43,6 +43,7 @@ const GlobalEventSchema = Schema.Struct({
       )
       .toArray(),
     InstanceDisposed,
+    InstanceReloaded,
     ...SyncEventSchemas,
   ]),
 }).annotate({ identifier: "GlobalEvent" })
