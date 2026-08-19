@@ -54,6 +54,7 @@ export interface Interface {
   ) => Effect.Effect<Output>
   readonly list: () => Effect.Effect<Hooks[]>
   readonly init: () => Effect.Effect<void>
+  readonly refireConfig: (cfg: Config.Info) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Plugin") {}
@@ -108,6 +109,23 @@ function getLegacyPlugins(mod: Record<string, unknown>) {
 
   return result
 }
+
+// Single source of truth for firing each hook's `config` callback against a config.
+// Byte-equivalent to the boot-time loop: failures are logged and ignored per hook,
+// so one broken plugin never blocks the others (or the reload route).
+const fireConfigHooks = (hooks: Hooks[], cfg: Config.Info) =>
+  Effect.forEach(
+    hooks,
+    (hook) =>
+      Effect.tryPromise({
+        try: () => Promise.resolve((hook as any).config?.(cfg)),
+        catch: errorMessage,
+      }).pipe(
+        Effect.tapError((error) => Effect.logError("plugin config hook failed", { error })),
+        Effect.ignore,
+      ),
+    { discard: true },
+  )
 
 async function applyPlugin(load: PluginLoader.Loaded, input: PluginInput, hooks: Hooks[]) {
   const plugin = readV1Plugin(load.mod, load.spec, "server", "detect")
@@ -240,15 +258,7 @@ const layer = Layer.effect(
         }
 
         // Notify plugins of current config
-        for (const hook of hooks) {
-          yield* Effect.tryPromise({
-            try: () => Promise.resolve((hook as any).config?.(cfg)),
-            catch: errorMessage,
-          }).pipe(
-            Effect.tapError((error) => Effect.logError("plugin config hook failed", { error })),
-            Effect.ignore,
-          )
-        }
+        yield* fireConfigHooks(hooks, cfg)
 
         const unsubscribe = yield* events.listen((event) => {
           if (event.location?.directory !== ctx.directory) return Effect.void
@@ -303,7 +313,16 @@ const layer = Layer.effect(
       yield* InstanceState.get(state)
     })
 
-    return Service.of({ trigger, list, init })
+    // Re-fire `config` hooks against a fresh config without invalidating Plugin.state:
+    // invalidating would run every plugin's finalizers (hook.dispose cascade: OMO
+    // sessionStateStore.shutdown, omo.nsfw backgroundManager.dispose, run-state's
+    // runner-cancel) — the teardown this reload path exists to avoid.
+    const refireConfig = Effect.fn("Plugin.refireConfig")(function* (cfg: Config.Info) {
+      const s = yield* InstanceState.get(state)
+      yield* fireConfigHooks(s.hooks, cfg)
+    })
+
+    return Service.of({ trigger, list, init, refireConfig })
   }),
 )
 
