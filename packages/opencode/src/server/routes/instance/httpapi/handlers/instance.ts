@@ -1,29 +1,92 @@
 import { Agent } from "@/agent/agent"
 import { Command } from "@/command"
+import { Config } from "@/config/config"
 import * as InstanceState from "@/effect/instance-state"
+import { GlobalBus } from "@/bus/global"
 import { Format } from "@/format"
 import { Global } from "@opencode-ai/core/global"
 import { LSP } from "@/lsp/lsp"
+import { Plugin } from "@/plugin"
+import type { InstanceContext } from "@/project/instance-context"
 import { Vcs } from "@/project/vcs"
 import { Skill } from "@/skill"
+import { WorkspaceContext } from "@/control-plane/workspace-context"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
+import { HttpServerError, HttpServerRequest } from "effect/unstable/http"
 import { InstanceHttpApi } from "../api"
 import { ApiVcsApplyError } from "../groups/instance"
 import { markInstanceForDisposal } from "../lifecycle"
+
+// Nested reload-config calls for the same directory are served immediately (bounded
+// recursion) rather than queued; the mark clears on completion or interruption.
+const reloadInFlight = new Set<string>()
+
+// Shared by the route handler and tests. Order is load-bearing: the plugin config hooks
+// must observe the FRESH config before Agent.state re-materializes from it, otherwise the
+// agent registry is built from pre-refire state (R3 divergence).
+export const reloadInstanceConfig = (input: {
+  config: Config.Interface
+  plugin: Plugin.Interface
+  agent: Agent.Interface
+  ctx: InstanceContext
+}) =>
+  Effect.fn("InstanceHttpApi.reloadConfig")(function* () {
+    const directory = input.ctx.directory
+    if (reloadInFlight.has(directory)) return true
+    reloadInFlight.add(directory)
+    return yield* Effect.ensuring(
+      Effect.gen(function* () {
+        const fresh = yield* input.config.reload()
+        yield* input.plugin.refireConfig(fresh)
+        yield* input.agent.reload()
+        GlobalBus.emit("event", {
+          directory: input.ctx.directory,
+          project: input.ctx.project.id,
+          workspace: WorkspaceContext.workspaceID,
+          payload: {
+            type: "server.instance.reloaded",
+            properties: {
+              directory: input.ctx.directory,
+              project: input.ctx.project.id,
+            },
+          },
+        })
+        return true
+      }),
+      Effect.sync(() => reloadInFlight.delete(directory)),
+    )
+  })
 
 export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance", (handlers) =>
   Effect.gen(function* () {
     const agent = yield* Agent.Service
     const command = yield* Command.Service
+    const config = yield* Config.Service
     const format = yield* Format.Service
     const lsp = yield* LSP.Service
+    const plugin = yield* Plugin.Service
     const skill = yield* Skill.Service
     const vcs = yield* Vcs.Service
 
     const dispose = Effect.fn("InstanceHttpApi.dispose")(function* () {
       yield* markInstanceForDisposal(yield* InstanceState.context)
       return true
+    })
+
+    const reloadConfig = Effect.fn("InstanceHttpApi.reloadConfig")(function* () {
+      const ctx = yield* InstanceState.context
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const exists = yield* FSUtil.Service.use((fs) => fs.existsSafe(ctx.directory))
+      if (!exists) {
+        return yield* Effect.die(
+          new HttpServerError.HttpServerError({
+            reason: new HttpServerError.RouteNotFound({ request }),
+          }),
+        )
+      }
+      return yield* reloadInstanceConfig({ config, plugin, agent, ctx })()
     })
 
     const getPath = Effect.fn("InstanceHttpApi.path")(function* () {
@@ -95,6 +158,7 @@ export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance"
 
     return handlers
       .handle("dispose", dispose)
+      .handle("reloadConfig", reloadConfig)
       .handle("path", getPath)
       .handle("vcs", getVcs)
       .handle("vcsStatus", getVcsStatus)

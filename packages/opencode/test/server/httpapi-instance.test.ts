@@ -262,4 +262,35 @@ describe("instance HttpApi", () => {
       )
     }),
   )
+
+  it.live("reloads config through the instance reload-config route and serves the fresh config", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true, config: { model: "first/model" } })
+      const fs = yield* FileSystem.FileSystem
+      const path = yield* Path.Path
+      yield* fs.writeFileString(path.join(dir, "opencode.json"), JSON.stringify({ model: "second/model" }))
+
+      const reload = yield* HttpClientRequest.post(InstancePaths.reloadConfig).pipe(
+        directoryHeader(dir),
+        HttpClient.execute,
+      )
+      expect(reload.status).toBe(200)
+      expect(yield* reload.json).toBe(true)
+
+      const config = yield* HttpClientRequest.get("/config").pipe(directoryHeader(dir), HttpClient.execute)
+      expect(config.status).toBe(200)
+      expect(yield* config.json).toMatchObject({ model: "second/model" })
+    }),
+  )
+
+  it.live("returns 404 for reload-config on a nonexistent directory", () =>
+    Effect.gen(function* () {
+      const response = yield* HttpClientRequest.post(InstancePaths.reloadConfig).pipe(
+        directoryHeader("/nonexistent-dir-xyz-12345"),
+        HttpClient.execute,
+      )
+
+      expect(response.status).toBe(404)
+    }),
+  )
 })

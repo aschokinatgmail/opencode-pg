@@ -5,7 +5,7 @@ import { EventManifest } from "@/event-manifest"
 import { Credential } from "@opencode-ai/core/credential"
 import { Integration } from "@opencode-ai/core/integration"
 import { SkillV2 } from "@opencode-ai/core/skill"
-import { InstanceDisposed } from "@/server/event"
+import { InstanceDisposed, InstanceReloaded } from "@/server/event"
 import { Question } from "@/question"
 import { ConfigApi } from "./groups/config"
 import { ControlApi } from "./groups/control"
@@ -43,6 +43,7 @@ const EventSchema = Schema.Union([
     )
     .toArray(),
   InstanceDisposed,
+  InstanceReloaded,
 ]).annotate({ identifier: "Event" })
 
 export const ServerApi = makeApi({
