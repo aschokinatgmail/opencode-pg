@@ -42,6 +42,7 @@ export class ApiVcsApplyError extends Schema.ErrorClass<ApiVcsApplyError>("VcsAp
 
 export const InstancePaths = {
   dispose: "/instance/dispose",
+  reloadConfig: "/instance/reload-config",
   path: "/path",
   vcs: "/vcs",
   vcsStatus: "/vcs/status",
@@ -67,6 +68,17 @@ export const InstanceApi = HttpApi.make("instance")
             identifier: "instance.dispose",
             summary: "Dispose instance",
             description: "Clean up and dispose the current OpenCode instance, releasing all resources.",
+          }),
+        ),
+        HttpApiEndpoint.post("reloadConfig", InstancePaths.reloadConfig, {
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Boolean, "Config reloaded"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "instance.reloadConfig",
+            summary: "Reload config",
+            description:
+              "Re-read the configuration from disk, re-fire plugin config hooks, and refresh the agent registry without tearing down the instance.",
           }),
         ),
         HttpApiEndpoint.get("path", InstancePaths.path, {
