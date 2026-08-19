@@ -108,10 +108,22 @@ async function resolveLoadedPlugins<T extends { plugin?: ConfigPluginV1.Spec[] }
   return config
 }
 
-type Info = ConfigV1.Info & {
+export type Info = ConfigV1.Info & {
   // plugin_origins is derived state, not a persisted config field. It keeps each winning plugin spec together
   // with the file and scope it came from so later runtime code can make location-sensitive decisions.
   plugin_origins?: ConfigPlugin.Origin[]
+}
+
+// Generation-counter guard for Config.reload: if the reloaded object is reference-equal to the
+// object the cache was invalidated from, the invalidation was a silent no-op. A stale reload
+// strands every dependent (Agent.state, plugin hooks) on the old config, so it must fail hard.
+export function assertFreshReload(previous: Info, fresh: Info): Info {
+  if (fresh === previous) {
+    throw new Error(
+      "config reload returned the same object identity as the invalidated cache; refusing stale reload",
+    )
+  }
+  return fresh
 }
 
 type State = {
@@ -128,6 +140,7 @@ export interface Interface {
   readonly update: (config: Info) => Effect.Effect<void>
   readonly updateGlobal: (config: Info) => Effect.Effect<{ info: Info; changed: boolean }>
   readonly invalidate: () => Effect.Effect<void>
+  readonly reload: () => Effect.Effect<Info>
   readonly directories: () => Effect.Effect<string[]>
   readonly waitForDependencies: () => Effect.Effect<void>
 }
@@ -634,6 +647,17 @@ const layer = Layer.effect(
       yield* invalidateGlobal
     })
 
+    // Reload drops the per-instance cache and re-materializes from disk. The process-wide
+    // global cache is deliberately untouched: reload-sensitive changes (project/local files,
+    // plugin templates) are re-read per materialization, and global writes go through
+    // Config.updateGlobal → invalidate().
+    const reload = Effect.fn("Config.reload")(function* () {
+      const previous = yield* InstanceState.use(state, (s) => s.config)
+      yield* InstanceState.invalidate(state)
+      const fresh = yield* get()
+      return assertFreshReload(previous, fresh)
+    })
+
     const updateGlobal = Effect.fn("Config.updateGlobal")(function* (config: Info) {
       const file = globalConfigFile()
       const before = (yield* readConfigFile(file)) ?? "{}"
@@ -666,6 +690,7 @@ const layer = Layer.effect(
       update,
       updateGlobal,
       invalidate,
+      reload,
       directories,
       waitForDependencies,
     })
