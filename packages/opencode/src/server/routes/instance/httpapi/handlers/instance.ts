@@ -10,11 +10,18 @@ import { Plugin } from "@/plugin"
 import type { InstanceContext } from "@/project/instance-context"
 import { Vcs } from "@/project/vcs"
 import { Skill } from "@/skill"
+import { WorkspaceContext } from "@/control-plane/workspace-context"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
+import { HttpServerError, HttpServerRequest } from "effect/unstable/http"
 import { InstanceHttpApi } from "../api"
 import { ApiVcsApplyError } from "../groups/instance"
 import { markInstanceForDisposal } from "../lifecycle"
+
+// Nested reload-config calls for the same directory are served immediately (bounded
+// recursion) rather than queued; the mark clears on completion or interruption.
+const reloadInFlight = new Set<string>()
 
 // Shared by the route handler and tests. Order is load-bearing: the plugin config hooks
 // must observe the FRESH config before Agent.state re-materializes from it, otherwise the
@@ -26,21 +33,30 @@ export const reloadInstanceConfig = (input: {
   ctx: InstanceContext
 }) =>
   Effect.fn("InstanceHttpApi.reloadConfig")(function* () {
-    const fresh = yield* input.config.reload()
-    yield* input.plugin.refireConfig(fresh)
-    yield* input.agent.reload()
-    GlobalBus.emit("event", {
-      directory: input.ctx.directory,
-      project: input.ctx.project.id,
-      payload: {
-        type: "server.instance.reloaded",
-        properties: {
+    const directory = input.ctx.directory
+    if (reloadInFlight.has(directory)) return true
+    reloadInFlight.add(directory)
+    return yield* Effect.ensuring(
+      Effect.gen(function* () {
+        const fresh = yield* input.config.reload()
+        yield* input.plugin.refireConfig(fresh)
+        yield* input.agent.reload()
+        GlobalBus.emit("event", {
           directory: input.ctx.directory,
           project: input.ctx.project.id,
-        },
-      },
-    })
-    return true
+          workspace: WorkspaceContext.workspaceID,
+          payload: {
+            type: "server.instance.reloaded",
+            properties: {
+              directory: input.ctx.directory,
+              project: input.ctx.project.id,
+            },
+          },
+        })
+        return true
+      }),
+      Effect.sync(() => reloadInFlight.delete(directory)),
+    )
   })
 
 export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance", (handlers) =>
@@ -61,6 +77,15 @@ export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance"
 
     const reloadConfig = Effect.fn("InstanceHttpApi.reloadConfig")(function* () {
       const ctx = yield* InstanceState.context
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const exists = yield* FSUtil.Service.use((fs) => fs.existsSafe(ctx.directory))
+      if (!exists) {
+        return yield* Effect.die(
+          new HttpServerError.HttpServerError({
+            reason: new HttpServerError.RouteNotFound({ request }),
+          }),
+        )
+      }
       return yield* reloadInstanceConfig({ config, plugin, agent, ctx })()
     })
 

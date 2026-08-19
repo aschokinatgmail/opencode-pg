@@ -84,4 +84,98 @@ describe("reloadConfig handler", () => {
       ])
     })
   })
+
+  test("runs config.reload before refireConfig before agent.reload in one ordered list", () => {
+    const order: string[] = []
+    const configServiceOrdered: Config.Interface = {
+      ...configService,
+      reload: Effect.fn("TestConfig.reloadOrdered")(function* () {
+        order.push("config")
+        return freshConfig
+      }),
+    }
+    const pluginServiceOrdered: Plugin.Interface = {
+      ...pluginService,
+      refireConfig: (cfg) => {
+        order.push("refire")
+        calls.refire.push(cfg)
+        return Effect.void
+      },
+    }
+    const agentServiceOrdered: Agent.Interface = {
+      ...agentService,
+      reload: Effect.fn("TestAgent.reloadOrdered")(function* () {
+        order.push("agent")
+      }),
+    }
+
+    return Effect.runPromise(
+      reloadInstanceConfig({
+        config: configServiceOrdered,
+        plugin: pluginServiceOrdered,
+        agent: agentServiceOrdered,
+        ctx,
+      })(),
+    ).then((result) => {
+      expect(result).toBe(true)
+      expect(order).toEqual(["config", "refire", "agent"])
+    })
+  })
+
+  test("serves a nested reload-config call for the same directory without recursing, then clears the guard", () => {
+    let configReloads = 0
+    let refires = 0
+    let nestedResult: boolean | undefined
+    const configServiceNested: Config.Interface = {
+      ...configService,
+      reload: Effect.fn("TestConfig.reloadNested")(function* () {
+        configReloads += 1
+        return freshConfig
+      }),
+    }
+    const pluginServiceNested: Plugin.Interface = {
+      ...pluginService,
+      refireConfig: (cfg) => {
+        refires += 1
+        // Synchronously invoke the exported function again with the same input:
+        // the guard must serve the nested call immediately (no recursion).
+        nestedResult = Effect.runSync(
+          reloadInstanceConfig({
+            config: configServiceNested,
+            plugin: pluginServiceNested,
+            agent: agentService,
+            ctx,
+          })(),
+        )
+        return Effect.void
+      },
+    }
+
+    return Effect.runPromise(
+      reloadInstanceConfig({
+        config: configServiceNested,
+        plugin: pluginServiceNested,
+        agent: agentService,
+        ctx,
+      })(),
+    ).then((result) => {
+      expect(result).toBe(true)
+      expect(nestedResult).toBe(true)
+      expect(configReloads).toBe(1)
+      expect(refires).toBe(1)
+      // Guard cleared after completion: a sequential second run reloads again.
+      return Effect.runPromise(
+        reloadInstanceConfig({
+          config: configServiceNested,
+          plugin: pluginServiceNested,
+          agent: agentService,
+          ctx,
+        })(),
+      ).then((second) => {
+        expect(second).toBe(true)
+        expect(configReloads).toBe(2)
+        expect(refires).toBe(2)
+      })
+    })
+  })
 })

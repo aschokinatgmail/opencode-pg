@@ -282,4 +282,15 @@ describe("instance HttpApi", () => {
       expect(yield* config.json).toMatchObject({ model: "second/model" })
     }),
   )
+
+  it.live("returns 404 for reload-config on a nonexistent directory", () =>
+    Effect.gen(function* () {
+      const response = yield* HttpClientRequest.post(InstancePaths.reloadConfig).pipe(
+        directoryHeader("/nonexistent-dir-xyz-12345"),
+        HttpClient.execute,
+      )
+
+      expect(response.status).toBe(404)
+    }),
+  )
 })
