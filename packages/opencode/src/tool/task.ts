@@ -10,10 +10,12 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
+import { Provider } from "@/provider/provider"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { errorMessage } from "@/util/error"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -84,6 +86,7 @@ export const TaskTool = Tool.define(
     const agent = yield* Agent.Service
     const background = yield* BackgroundJob.Service
     const config = yield* Config.Service
+    const provider = yield* Provider.Service
     const sessions = yield* Session.Service
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
@@ -133,6 +136,36 @@ export const TaskTool = Tool.define(
         return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
+      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.orDie,
+      )
+      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+      const variant = msg.info.variant
+
+      const model = next.model ?? {
+        modelID: msg.info.modelID,
+        providerID: msg.info.providerID,
+      }
+
+      // B1: fail-fast pre-validation. Resolve the model the same way createUserMessage
+      // (prompt.ts:646) will, BEFORE creating the child session row. On ModelNotFoundError
+      // or registry defects, fail without ever persisting a child session — the parent's
+      // tool-part error state (PartUpdated) carries the failure per Athena B1.1.
+      // KEEP IN SYNC with prompt.ts:646 resolution chain (Oracle R3 risk-table mitigation).
+      yield* provider.getModel(model.providerID, model.modelID).pipe(
+        Effect.mapError(
+          (error) =>
+            new Error(
+              `Subagent model unavailable: ${model.providerID}/${model.modelID}${
+                Provider.ModelNotFoundError.isInstance(error) && error.suggestions?.length
+                  ? ` (did you mean: ${error.suggestions.join(", ")}?)`
+                  : ""
+              }`,
+            ),
+        ),
+      )
+
       const session = params.task_id
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
@@ -171,21 +204,14 @@ export const TaskTool = Tool.define(
           ],
         }))
 
-      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
-        Effect.provideService(Database.Service, database),
-        Effect.orDie,
-      )
-      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
-      const variant = msg.info.variant
-
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      // AR2: childState metadata on the parent task part. "started" is written once the
+      // first prompt attempt begins (runTask entry); "failed" is written on error. Both
+      // ride the existing ctx.metadata PartUpdated path (Athena B1.1).
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,
+        childState: "started" as const,
         ...(runInBackground ? { background: true } : {}),
       }
 
@@ -210,6 +236,18 @@ export const TaskTool = Tool.define(
           agent: next.name,
           parts,
         })
+        // B3: surface subagent provider errors as a tool failure. No auto-retry.
+        if (result.info.role === "assistant" && result.info.error) {
+          yield* ctx.metadata({
+            title: params.description,
+            metadata: { ...metadata, childState: "failed" as const },
+          })
+          return yield* Effect.fail(
+            new Error(
+              `Subagent task failed (session ${nextSession.id}): ${errorMessage(result.info.error)}`,
+            ),
+          )
+        }
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
       })
 

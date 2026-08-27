@@ -608,6 +608,11 @@ const layer = Layer.effect(
           if ((yield* config.get()).compaction?.auto === false && !ctx.assistantMessage.summary) {
             ctx.assistantMessage.error = error
             ctx.assistantMessage.finish = "error"
+            // B2: persist the error before status.set(idle) so replay reproduces the
+            // errored row (mirrors the interrupt path at :595-596; projector upsert is
+            // idempotent). Exactly one ephemeral Error publish above — no durable error
+            // event type (Athena B2.1/B2.2).
+            yield* session.updateMessage(ctx.assistantMessage)
             yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
             yield* status.set(ctx.sessionID, { type: "idle" })
             return
@@ -617,6 +622,10 @@ const layer = Layer.effect(
           return
         }
         ctx.assistantMessage.error = error
+        // B2: persist the error before status.set(idle) (mirrors :595-596; idempotent
+        // projector upsert). Exactly one ephemeral Error publish below — no durable
+        // error event type (Athena B2.1/B2.2).
+        yield* session.updateMessage(ctx.assistantMessage)
         yield* events.publish(Session.Event.Error, {
           sessionID: ctx.assistantMessage.sessionID,
           error: ctx.assistantMessage.error,

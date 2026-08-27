@@ -3,11 +3,12 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
+import { Provider } from "@/provider/provider"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Session } from "@/session/session"
@@ -34,6 +35,35 @@ const ref = {
   modelID: ModelV2.ID.make("test-model"),
 }
 
+const providerCfg = {
+  provider: {
+    test: {
+      name: "Test",
+      id: "test",
+      env: [],
+      npm: "@ai-sdk/openai-compatible",
+      models: {
+        "test-model": {
+          id: "test-model",
+          name: "Test Model",
+          attachment: false,
+          reasoning: false,
+          temperature: false,
+          tool_call: true,
+          release_date: "2025-01-01",
+          limit: { context: 100000, output: 10000 },
+          cost: { input: 0, output: 0 },
+          options: {},
+        },
+      },
+      options: {
+        apiKey: "test-key",
+        baseURL: "http://localhost:1/v1",
+      },
+    },
+  },
+}
+
 const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
   LayerNode.compile(
     LayerNode.group([
@@ -41,6 +71,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       BackgroundJob.node,
       EventV2Bridge.node,
       Config.node,
+      Provider.node,
       CrossSpawnSpawner.node,
       Session.node,
       SessionProjector.node,
@@ -253,6 +284,7 @@ describe("tool.task", () => {
       expect(seen?.sessionID).toBe(child.id)
       expect(seen?.variant).toBe("xhigh")
     }),
+    { config: providerCfg },
   )
 
   it.instance("execute asks by default and skips checks when bypassed", () =>
@@ -299,6 +331,7 @@ describe("tool.task", () => {
         },
       })
     }),
+    { config: providerCfg },
   )
 
   it.instance("execute cancels child session when abort signal fires", () =>
@@ -349,6 +382,7 @@ describe("tool.task", () => {
       const exit = yield* Fiber.await(fiber)
       expect(Exit.isSuccess(exit)).toBe(true)
     }),
+    { config: providerCfg },
   )
 
   it.instance("execute creates a child when task_id does not exist", () =>
@@ -386,6 +420,7 @@ describe("tool.task", () => {
       expect(result.output).toContain(`<task id="${result.metadata.sessionId}" state="completed">`)
       expect(seen?.sessionID).toBe(result.metadata.sessionId)
     }),
+    { config: providerCfg },
   )
 
   it.instance("prevents subagents from launching subagents by default", () =>
@@ -465,7 +500,7 @@ describe("tool.task", () => {
 
         expect((yield* sessions.get(result.metadata.sessionId)).parentID).toBe(child.id)
       }),
-    { config: { subagent_depth: 2 } },
+    { config: { ...providerCfg, subagent_depth: 2 } },
   )
 
   it.instance(
@@ -521,6 +556,7 @@ describe("tool.task", () => {
       }),
     {
       config: {
+        ...providerCfg,
         agent: {
           reviewer: {
             mode: "subagent",
@@ -631,6 +667,7 @@ describe("tool.task", () => {
       expect((yield* Deferred.await(injected)).parts[0]?.type).toBe("text")
       expect(runs).toBe(1)
     }),
+    { config: providerCfg },
   )
 
   background.instance("execute launches background tasks without waiting for completion", () =>
@@ -669,6 +706,7 @@ describe("tool.task", () => {
       expect(result.output).toContain(`state="running"`)
       expect(job?.status).toBe("running")
     }),
+    { config: providerCfg },
   )
 
   background.instance("background task completion waits for running updates", () =>
@@ -743,6 +781,7 @@ describe("tool.task", () => {
       expect(notification.parts[0]?.type).toBe("text")
       if (notification.parts[0]?.type === "text") expect(notification.parts[0].text).toContain("second done")
     }),
+    { config: providerCfg },
   )
 
   background.instance("background tasks complete through the background job service", () =>
@@ -776,6 +815,7 @@ describe("tool.task", () => {
       expect(waited.info?.status).toBe("completed")
       expect(waited.info?.output).toBe("background done")
     }),
+    { config: providerCfg },
   )
 
   background.instance("background task completion does not wait for the parent async prompt", () =>
@@ -814,6 +854,7 @@ describe("tool.task", () => {
       expect(waited.timedOut).toBe(false)
       expect(waited.info?.status).toBe("completed")
     }),
+    { config: providerCfg },
   )
 
   background.instance("removing the parent session cancels running background tasks", () =>
@@ -853,6 +894,7 @@ describe("tool.task", () => {
       expect(waited.timedOut).toBe(false)
       expect(waited.info?.status).toBe("cancelled")
     }),
+    { config: providerCfg },
   )
 
   background.instance("removing the child task session cancels its running background task", () =>
@@ -892,6 +934,7 @@ describe("tool.task", () => {
       expect(waited.timedOut).toBe(false)
       expect(waited.info?.status).toBe("cancelled")
     }),
+    { config: providerCfg },
   )
 
   background.instance("cancelling the parent run cancels running background tasks", () =>
@@ -931,6 +974,7 @@ describe("tool.task", () => {
       expect(waited.timedOut).toBe(false)
       expect(waited.info?.status).toBe("cancelled")
     }),
+    { config: providerCfg },
   )
 
   it.instance("cancelling a child run cancels its own pre-runner task job", () =>
@@ -981,5 +1025,178 @@ describe("tool.task", () => {
       expect((yield* jobs.get(child.id))?.status).toBe("cancelled")
       expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
     }),
+  )
+
+  it.instance("B1: unresolvable subagent model fails fast without creating a child session", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const promptOps = stubOps()
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const message = Cause.squash(exit.cause)
+        expect(String(message)).toContain("Subagent model unavailable: test/test-model")
+      }
+      // B1 zero-child-rows proof: no child session row ever created
+      expect(yield* sessions.children(chat.id)).toHaveLength(0)
+    }),
+  )
+
+  it.instance("B3: runTask surfaces subagent result.info.error as a tool failure with session id", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const subagentError = new SessionV1.APIError({
+        message: "provider blew up",
+        isRetryable: false,
+      })
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.sync(() => {
+            const id = input.messageID ?? MessageID.ascending()
+            return {
+              info: {
+                id,
+                role: "assistant" as const,
+                parentID: MessageID.ascending(),
+                sessionID: input.sessionID,
+                mode: input.agent ?? "general",
+                agent: input.agent ?? "general",
+                cost: 0,
+                path: { cwd: "/tmp", root: "/tmp" },
+                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                modelID: input.model?.modelID ?? ref.modelID,
+                providerID: input.model?.providerID ?? ref.providerID,
+                time: { created: Date.now() },
+                finish: "error" as const,
+                error: subagentError.toObject(),
+              },
+              parts: [],
+            }
+          }),
+      }
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const message = String(Cause.squash(exit.cause))
+        expect(message).toContain("Subagent task failed (session ")
+        expect(message).toContain("provider blew up")
+      }
+      // child session WAS created (B1 passed, model resolved), but the task failed
+      expect(yield* sessions.children(chat.id)).toHaveLength(1)
+    }),
+    { config: providerCfg },
+  )
+
+  it.instance("AR2: parent task part metadata carries childState started then failed", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const metadataCalls: Record<string, any>[] = []
+      const subagentError = new SessionV1.APIError({
+        message: "provider blew up",
+        isRetryable: false,
+      })
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          Effect.sync(() => {
+            const id = input.messageID ?? MessageID.ascending()
+            return {
+              info: {
+                id,
+                role: "assistant" as const,
+                parentID: MessageID.ascending(),
+                sessionID: input.sessionID,
+                mode: input.agent ?? "general",
+                agent: input.agent ?? "general",
+                cost: 0,
+                path: { cwd: "/tmp", root: "/tmp" },
+                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                modelID: input.model?.modelID ?? ref.modelID,
+                providerID: input.model?.providerID ?? ref.providerID,
+                time: { created: Date.now() },
+                finish: "error" as const,
+                error: subagentError.toObject(),
+              },
+              parts: [],
+            }
+          }),
+      }
+
+      yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: (input) => Effect.sync(() => metadataCalls.push(input.metadata as Record<string, any>)),
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(metadataCalls.length).toBeGreaterThanOrEqual(2)
+      expect(metadataCalls[0]?.childState).toBe("started")
+      expect(metadataCalls.at(-1)?.childState).toBe("failed")
+    }),
+    { config: providerCfg },
   )
 })

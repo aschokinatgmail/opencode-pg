@@ -1112,3 +1112,52 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
     { config: cfg },
   ),
 )
+
+itFragmentFailure.live("session.processor effect tests B2 persist error before idle on halt", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const sts = yield* SessionStatus.Service
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "provider failure b2")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const result = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "provider failure b2" }],
+          tools: {},
+        })
+
+        expect(result).toBe("stop")
+        // B2: error persisted to the message row before idle
+        const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+        expect(stored.info.role).toBe("assistant")
+        if (stored.info.role === "assistant") {
+          expect(stored.info.error).toBeDefined()
+        }
+        const state = yield* sts.get(chat.id)
+        expect(state).toMatchObject({ type: "idle" })
+        // B2 idempotence: re-read still has the error
+        const reread = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+        if (reread.info.role === "assistant") {
+          expect(reread.info.error).toBeDefined()
+        }
+      }),
+    { config: cfg },
+  ),
+)

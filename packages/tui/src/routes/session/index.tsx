@@ -55,6 +55,7 @@ import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
 import { SubagentFooter } from "./subagent-footer.tsx"
+import { emptySubagentFrame } from "./subagent-empty-frame.ts"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
@@ -1293,6 +1294,34 @@ export function Session() {
                     </Switch>
                   )}
                 </For>
+                <Show when={emptySubagentFrame({ messages: messages(), session: session() })}>
+                  {(frame) => (
+                    <box marginTop={1} border={["left"]} borderColor={theme.border} flexShrink={0}>
+                      <box paddingTop={1} paddingBottom={1} paddingLeft={2}>
+                        <text fg={theme.textMuted}>This subagent produced no transcript.</text>
+                        <text fg={theme.textMuted}>
+                          {" "}
+                          Agent: <span style={{ fg: theme.text }}>{frame().agent ?? "unknown"}</span>
+                        </text>
+                        <Show when={frame().model}>
+                          {(model) => (
+                            <text fg={theme.textMuted}>
+                              {" "}
+                              Model:{" "}
+                              <span style={{ fg: theme.text }}>
+                                {model().providerID}/{model().id}
+                              </span>
+                            </text>
+                          )}
+                        </Show>
+                        <text fg={theme.textMuted}>
+                          {" "}
+                          Parent: <span style={{ fg: theme.text }}>{frame().parentID}</span>
+                        </text>
+                      </box>
+                    </box>
+                  )}
+                </Show>
               </scrollbox>
               <box flexShrink={0}>
                 <Show when={permissions().length > 0}>
