@@ -1,8 +1,9 @@
 export * as SessionContextEpoch from "./context-epoch"
 
-import { eq } from "drizzle-orm"
+import { and, eq, lte } from "drizzle-orm"
 import { DateTime, Effect, Schema } from "effect"
 import type { Database } from "../database/database"
+import type { SchemaTables } from "../database/schema.pg"
 import { EventV2 } from "../event"
 import { SystemContext } from "../system-context/index"
 import { ContextSnapshotDecodeError } from "./error"
@@ -11,7 +12,6 @@ import { SessionHistory } from "./history"
 import { SessionInput } from "./input"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
-import { SessionContextEpochTable } from "./sql"
 
 type DatabaseService = Database.Interface["db"]
 
@@ -22,34 +22,37 @@ interface Prepared {
 
 export function initialize(
   db: DatabaseService,
+  schema: SchemaTables,
   context: Effect.Effect<SystemContext.SystemContext>,
   sessionID: SessionSchema.ID,
 ): Effect.Effect<Prepared | undefined, SystemContext.InitializationBlocked> {
-  return initializeOnce(db, context, sessionID).pipe(Effect.withSpan("SessionContextEpoch.initialize"))
+  return initializeOnce(db, schema, context, sessionID).pipe(Effect.withSpan("SessionContextEpoch.initialize"))
 }
 
 export function prepare(
   db: DatabaseService,
+  schema: SchemaTables,
   events: EventV2.Interface,
   context: Effect.Effect<SystemContext.SystemContext>,
   sessionID: SessionSchema.ID,
 ): Effect.Effect<Prepared, SystemContext.InitializationBlocked | ContextSnapshotDecodeError> {
-  return prepareOnce(db, events, context, sessionID).pipe(Effect.withSpan("SessionContextEpoch.prepare"))
+  return prepareOnce(db, schema, events, context, sessionID).pipe(Effect.withSpan("SessionContextEpoch.prepare"))
 }
 
 const prepareOnce = Effect.fnUntraced(function* (
   db: DatabaseService,
+  schema: SchemaTables,
   events: EventV2.Interface,
   context: Effect.Effect<SystemContext.SystemContext>,
   sessionID: SessionSchema.ID,
 ) {
   const [value, stored, compaction] = yield* Effect.all(
-    [context, find(db, sessionID), SessionHistory.latestCompaction(db, sessionID)],
+    [context, find(db, schema, sessionID), SessionHistory.latestCompaction(db, schema, sessionID)],
     { concurrency: "unbounded" },
   )
   if (!stored) {
     const generation = yield* SystemContext.initialize(value)
-    const baselineSeq = yield* insert(db, sessionID, generation)
+    const baselineSeq = yield* insert(db, schema, sessionID, generation)
     return { baseline: generation.baseline, baselineSeq }
   }
 
@@ -64,31 +67,36 @@ const prepareOnce = Effect.fnUntraced(function* (
     return { baseline: stored.baseline, baselineSeq: stored.baseline_seq }
   }
   if (result._tag === "ReplacementReady") {
-    const baselineSeq = replacementSeq ?? (yield* EventV2.latestSequence(db, sessionID))
-    yield* replace(db, sessionID, baselineSeq, result.generation)
-    return { baseline: result.generation.baseline, baselineSeq }
+    const baselineSeq = replacementSeq ?? (yield* EventV2.latestSequence(db, schema, sessionID))
+    return yield* replace(db, schema, sessionID, baselineSeq, result.generation)
   }
 
   yield* events.publish(
     SessionEvent.ContextUpdated,
     { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: result.text },
-    { commit: () => advance(db, sessionID, result.snapshot).pipe(Effect.orDie) },
+    { commit: () => advance(db, schema, sessionID, result.snapshot).pipe(Effect.orDie) },
   )
   return { baseline: stored.baseline, baselineSeq: stored.baseline_seq }
 })
 
 const initializeOnce = Effect.fnUntraced(function* (
   db: DatabaseService,
+  schema: SchemaTables,
   context: Effect.Effect<SystemContext.SystemContext>,
   sessionID: SessionSchema.ID,
 ) {
-  if (yield* exists(db, sessionID)) return
+  if (yield* exists(db, schema, sessionID)) return
   const generation = yield* context.pipe(Effect.flatMap(SystemContext.initialize))
-  const baselineSeq = yield* insert(db, sessionID, generation)
+  const baselineSeq = yield* insert(db, schema, sessionID, generation)
   return { baseline: generation.baseline, baselineSeq }
 })
 
-const exists = Effect.fn("SessionContextEpoch.exists")(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
+const exists = Effect.fn("SessionContextEpoch.exists")(function* (
+  db: DatabaseService,
+  schema: SchemaTables,
+  sessionID: SessionSchema.ID,
+) {
+  const SessionContextEpochTable = schema.SessionContextEpochTable
   return (
     (yield* db
       .select({ sessionID: SessionContextEpochTable.session_id })
@@ -99,7 +107,12 @@ const exists = Effect.fn("SessionContextEpoch.exists")(function* (db: DatabaseSe
   )
 })
 
-const find = Effect.fn("SessionContextEpoch.find")(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
+const find = Effect.fn("SessionContextEpoch.find")(function* (
+  db: DatabaseService,
+  schema: SchemaTables,
+  sessionID: SessionSchema.ID,
+) {
+  const SessionContextEpochTable = schema.SessionContextEpochTable
   return yield* db
     .select()
     .from(SessionContextEpochTable)
@@ -110,8 +123,10 @@ const find = Effect.fn("SessionContextEpoch.find")(function* (db: DatabaseServic
 
 export const reset = Effect.fn("SessionContextEpoch.reset")(function* (
   db: DatabaseService,
+  schema: SchemaTables,
   sessionID: SessionSchema.ID,
 ) {
+  const SessionContextEpochTable = schema.SessionContextEpochTable
   yield* db
     .delete(SessionContextEpochTable)
     .where(eq(SessionContextEpochTable.session_id, sessionID))
@@ -119,12 +134,18 @@ export const reset = Effect.fn("SessionContextEpoch.reset")(function* (
     .pipe(Effect.orDie)
 })
 
-const insert = Effect.fnUntraced(function* (
+export const insert = Effect.fnUntraced(function* (
   db: DatabaseService,
+  schema: SchemaTables,
   sessionID: SessionSchema.ID,
   generation: SystemContext.Generation,
 ) {
-  const baselineSeq = yield* EventV2.latestSequence(db, sessionID)
+  const SessionContextEpochTable = schema.SessionContextEpochTable
+  const baselineSeq = yield* EventV2.latestSequence(db, schema, sessionID)
+  // B4.1: INSERT ... ON CONFLICT (session_id) DO NOTHING + read-back via find().
+  // The RETURNED baseline_seq must come from the read-back row, never the
+  // local computation. Handles the two-processes-resuming-one-session race
+  // (PG multi-process reachable; today impossible under Semaphore(1)).
   yield* db
     .insert(SessionContextEpochTable)
     .values({
@@ -133,17 +154,26 @@ const insert = Effect.fnUntraced(function* (
       snapshot: generation.snapshot,
       baseline_seq: baselineSeq,
     })
+    .onConflictDoNothing()
     .run()
     .pipe(Effect.orDie)
-  return baselineSeq
+  const stored = yield* find(db, schema, sessionID)
+  if (!stored) return yield* Effect.die("Context Epoch not found after insert")
+  return stored.baseline_seq
 })
 
-const replace = Effect.fnUntraced(function* (
+export const replace = Effect.fnUntraced(function* (
   db: DatabaseService,
+  schema: SchemaTables,
   sessionID: SessionSchema.ID,
   baselineSeq: number,
   generation: SystemContext.Generation,
 ) {
+  const SessionContextEpochTable = schema.SessionContextEpochTable
+  // B4.2: monotonic guarded UPDATE — SET baseline=…, snapshot=…,
+  // baseline_seq=:new WHERE session_id=:id AND baseline_seq <= :new + .returning().
+  // 0 rows ⇒ a newer epoch won — not an error: re-read via find() and
+  // continue with the stored row.
   const updated = yield* db
     .update(SessionContextEpochTable)
     .set({
@@ -151,18 +181,23 @@ const replace = Effect.fnUntraced(function* (
       snapshot: generation.snapshot,
       baseline_seq: baselineSeq,
     })
-    .where(eq(SessionContextEpochTable.session_id, sessionID))
-    .returning({ sessionID: SessionContextEpochTable.session_id })
+    .where(and(eq(SessionContextEpochTable.session_id, sessionID), lte(SessionContextEpochTable.baseline_seq, baselineSeq)))
+    .returning({ baseline: SessionContextEpochTable.baseline, baselineSeq: SessionContextEpochTable.baseline_seq })
     .get()
     .pipe(Effect.orDie)
-  if (!updated) return yield* Effect.die("Context Epoch not found")
+  if (updated) return updated
+  const stored = yield* find(db, schema, sessionID)
+  if (!stored) return yield* Effect.die("Context Epoch not found")
+  return { baseline: stored.baseline, baselineSeq: stored.baseline_seq }
 })
 
 const advance = Effect.fnUntraced(function* (
   db: DatabaseService,
+  schema: SchemaTables,
   sessionID: SessionSchema.ID,
   snapshot: SystemContext.Snapshot,
 ) {
+  const SessionContextEpochTable = schema.SessionContextEpochTable
   const updated = yield* db
     .update(SessionContextEpochTable)
     .set({ snapshot })

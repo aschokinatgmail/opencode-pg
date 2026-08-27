@@ -28,6 +28,11 @@
       "node": "./src/database/sqlite.node.ts",
       "default": "./src/database/sqlite.bun.ts"
     },
+    "#pg": {
+      "bun": "./src/database/pg.bun.ts",
+      "node": "./src/database/pg.node.ts",
+      "default": "./src/database/pg.bun.ts"
+    },
     "#pty": {
       "bun": "./src/pty/pty.bun.ts",
       "node": "./src/pty/pty.node.ts",
@@ -90,6 +95,7 @@
     "@npmcli/arborist": "9.4.0",
     "@npmcli/config": "10.8.1",
     "@opencode-ai/effect-drizzle-sqlite": "workspace:*",
+    "@opencode-ai/effect-drizzle-pg": "workspace:*",
     "@opencode-ai/effect-sqlite-node": "workspace:*",
     "@opencode-ai/llm": "workspace:*",
     "@opencode-ai/schema": "workspace:*",
@@ -119,6 +125,7 @@
     "mime-types": "3.0.2",
     "minimatch": "10.2.5",
     "npm-package-arg": "13.0.2",
+    "postgres": "3.4.7",
     "semver": "^7.6.3",
     "turndown": "7.2.0",
     "venice-ai-sdk-provider": "2.1.1",

@@ -5,8 +5,9 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { Credential } from "@opencode-ai/schema/credential"
 import { Integration } from "@opencode-ai/schema/integration"
 import { Database } from "./database/database"
+import * as DatabaseSchema from "./database/schema.pg"
 import { makeGlobalNode } from "./effect/app-node"
-import { CredentialTable } from "./credential/sql"
+import { node as SchemaNode } from "./schema-node"
 
 export const ID = Credential.ID
 export type ID = Credential.ID
@@ -52,8 +53,10 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const { db } = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    const CredentialTable = schema.CredentialTable
     const decode = Schema.decodeUnknownSync(Value)
-    const stored = (row: typeof CredentialTable.$inferSelect) => {
+    const stored = (row: DatabaseSchema.SchemaTables["CredentialTable"]["$inferSelect"]) => {
       if (!row.integration_id) return
       return new Info({
         id: row.id,
@@ -135,4 +138,8 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer, deps: [Database.node] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer: layer as unknown as Layer.Layer<Service, never, never>,
+  deps: [Database.node, SchemaNode],
+})

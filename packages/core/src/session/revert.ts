@@ -3,13 +3,14 @@ export * as SessionRevert from "./revert"
 import { and, asc, eq, gt } from "drizzle-orm"
 import { DateTime, Effect, Schema } from "effect"
 import { Database } from "../database/database"
+import * as DatabaseSchema from "../database/schema.pg"
+import type { SchemaTables } from "../database/schema.pg"
 import { EventV2 } from "../event"
 import { RelativePath } from "../schema"
 import { Snapshot } from "../snapshot"
 import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
-import { SessionMessageTable } from "./sql"
 
 export class MessageNotFoundError extends Schema.TaggedErrorClass<MessageNotFoundError>()(
   "Session.MessageNotFoundError",
@@ -24,8 +25,12 @@ interface BoundaryInput {
   readonly messageID: SessionMessage.ID
 }
 
-const plan = Effect.fn("SessionRevert.plan")(function* (input: BoundaryInput) {
-  const db = (yield* Database.Service).db
+const plan = Effect.fn("SessionRevert.plan")(function* (
+  db: Database.Interface["db"],
+  schema: SchemaTables,
+  input: BoundaryInput,
+) {
+  const SessionMessageTable = schema.SessionMessageTable
   const boundary = yield* db
     .select({ seq: SessionMessageTable.seq })
     .from(SessionMessageTable)
@@ -62,12 +67,14 @@ export const stage = Effect.fn("SessionRevert.stage")(function* (input: {
   readonly messageID: SessionMessage.ID
   readonly files?: boolean
 }) {
+  const db = (yield* Database.Service).db
+  const schema = yield* DatabaseSchema.Schema
   const snapshot = yield* Snapshot.Service
   const events = yield* EventV2.Service
   const original = input.session.revert?.snapshot
     ? Snapshot.ID.make(input.session.revert.snapshot)
     : yield* snapshot.capture()
-  const next = yield* plan({ sessionID: input.session.id, messageID: input.messageID })
+  const next = yield* plan(db, schema, { sessionID: input.session.id, messageID: input.messageID })
   const restore = new Map<RelativePath, Snapshot.ID>()
   if (original) {
     for (const file of input.session.revert?.files ?? []) restore.set(file.path, original)

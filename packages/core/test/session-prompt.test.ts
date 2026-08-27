@@ -2,6 +2,8 @@ import { describe, expect } from "bun:test"
 import { DateTime, Effect, Fiber, Layer, Stream } from "effect"
 import { eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
+import * as DatabaseSchema from "@opencode-ai/core/database/schema.pg"
+import * as SchemaSqliteNamespace from "@opencode-ai/core/schema-sqlite-namespace"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -43,9 +45,12 @@ const execution = Layer.succeed(
   }),
 )
 const it = testEffect(
-  AppNodeBuilder.build(
-    LayerNode.group([Database.node, EventV2.node, SessionProjector.node, SessionStore.node, SessionV2.node]),
-    [[SessionExecution.node, execution]],
+  Layer.merge(
+    AppNodeBuilder.build(
+      LayerNode.group([Database.node, EventV2.node, SessionProjector.node, SessionStore.node, SessionV2.node]),
+      [[SessionExecution.node, execution]],
+    ),
+    Layer.succeed(DatabaseSchema.Schema, SchemaSqliteNamespace.namespace),
   ),
 )
 const sessionID = SessionV2.ID.make("ses_prompt_test")
@@ -74,7 +79,12 @@ const setup = Effect.gen(function* () {
     .pipe(Effect.orDie)
 })
 
-const admitted = (id: SessionMessage.ID) => Database.Service.use(({ db }) => SessionInput.find(db, id))
+const admitted = (id: SessionMessage.ID) =>
+  Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    return yield* SessionInput.find(db, schema, id)
+  }) as Effect.Effect<SessionInput.Admitted | undefined>
 const admittedCount = Database.Service.use(({ db }) =>
   db
     .select()
@@ -189,12 +199,13 @@ describe("SessionV2.prompt", () => {
       const session = yield* SessionV2.Service
       const events = yield* EventV2.Service
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       const fiber = yield* session.events({ sessionID }).pipe(Stream.take(4), Stream.runCollect, Effect.forkScoped)
       yield* Effect.yieldNow
 
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "First" }), resume: false })
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
-      yield* SessionInput.promoteSteers(db, events, sessionID, Number.MAX_SAFE_INTEGER)
+      yield* SessionInput.promoteSteers(db, schema, events, sessionID, Number.MAX_SAFE_INTEGER)
       const streamed = Array.from(yield* Fiber.join(fiber))
 
       expect(streamed.map((event) => [event.durable?.seq, event.type])).toEqual([
@@ -363,14 +374,15 @@ describe("SessionV2.prompt", () => {
     Effect.gen(function* () {
       yield* setup
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       const session = yield* SessionV2.Service
       const events = yield* EventV2.Service
       yield* session.prompt({ id: messageID, sessionID, prompt: Prompt.make({ text: "Promote once" }), resume: false })
 
       yield* Effect.all(
         [
-          SessionInput.promoteSteers(db, events, sessionID, Number.MAX_SAFE_INTEGER),
-          SessionInput.promoteSteers(db, events, sessionID, Number.MAX_SAFE_INTEGER),
+          SessionInput.promoteSteers(db, schema, events, sessionID, Number.MAX_SAFE_INTEGER),
+          SessionInput.promoteSteers(db, schema, events, sessionID, Number.MAX_SAFE_INTEGER),
         ],
         { concurrency: "unbounded" },
       )
@@ -387,13 +399,14 @@ describe("SessionV2.prompt", () => {
     Effect.gen(function* () {
       yield* setup
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       const session = yield* SessionV2.Service
       const events = yield* EventV2.Service
       const first = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Before cutoff" }), resume: false })
       const cutoff = first.admittedSeq
       const second = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "After cutoff" }), resume: false })
 
-      yield* SessionInput.promoteSteers(db, events, sessionID, cutoff)
+      yield* SessionInput.promoteSteers(db, schema, events, sessionID, cutoff)
 
       expect(yield* admitted(first.id)).toHaveProperty("promotedSeq")
       expect(yield* admitted(second.id)).not.toHaveProperty("promotedSeq")

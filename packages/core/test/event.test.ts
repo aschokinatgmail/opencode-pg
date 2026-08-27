@@ -6,6 +6,8 @@ import { Session } from "@opencode-ai/schema/session"
 import { SessionEvent } from "@opencode-ai/schema/session-event"
 import { SessionV1 } from "@opencode-ai/schema/session-v1"
 import { Database } from "@opencode-ai/core/database/database"
+import * as DatabaseSchema from "@opencode-ai/core/database/schema.pg"
+import * as SchemaSqliteNamespace from "@opencode-ai/core/schema-sqlite-namespace"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
@@ -79,9 +81,17 @@ const durableData = (sessionID: Session.ID, text: string) => ({
 })
 
 const it = testEffect(
-  AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, Location.node]), [[Location.node, locationLayer]]),
+  Layer.merge(
+    AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, Location.node]), [[Location.node, locationLayer]]),
+    Layer.succeed(DatabaseSchema.Schema, SchemaSqliteNamespace.namespace),
+  ),
 )
-const itWithoutLocation = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node])))
+const itWithoutLocation = testEffect(
+  Layer.merge(
+    AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node])),
+    Layer.succeed(DatabaseSchema.Schema, SchemaSqliteNamespace.namespace),
+  ),
+)
 
 describe("EventV2", () => {
   it.effect("publishes events with the current location", () =>

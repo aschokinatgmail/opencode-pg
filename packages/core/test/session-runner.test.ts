@@ -11,6 +11,8 @@ import {
 } from "@opencode-ai/llm"
 import * as OpenAIChat from "@opencode-ai/llm/protocols/openai-chat"
 import { Database } from "@opencode-ai/core/database/database"
+import * as DatabaseSchema from "@opencode-ai/core/database/schema.pg"
+import * as SchemaSqliteNamespace from "@opencode-ai/core/schema-sqlite-namespace"
 import { makeLocationNode } from "@opencode-ai/core/effect/app-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
@@ -252,40 +254,43 @@ const execution = Layer.effect(
   }),
 ).pipe(Layer.provide(runnerLayer))
 const it = testEffect(
-  AppNodeBuilder.build(
-    LayerNode.group([
-      Database.node,
-      EventV2.node,
-      QuestionV2.node,
-      SessionProjector.node,
-      SessionStore.node,
-      ApplicationTools.node,
-      AgentV2.node,
-      ToolRegistry.node,
-      ToolRegistry.toolsNode,
-      echoNode,
-      SessionRunnerModel.node,
-      SystemContextRegistry.node,
-      SkillGuidance.node,
-      ReferenceGuidance.node,
-      Config.node,
-      Snapshot.node,
-      SessionRunnerLLM.node,
-      SessionExecution.node,
-      SessionV2.node,
-    ]),
-    [
-      [LayerNodePlatform.llmClient, client],
-      [PermissionV2.node, permission],
-      [SessionRunnerModel.node, models],
-      [SystemContextRegistry.node, systemContext],
-      [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
-      [SkillGuidance.node, skillGuidance],
-      [ReferenceGuidance.node, referenceGuidance],
-      [Snapshot.node, Snapshot.noopLayer],
-      [SessionExecution.node, execution],
-      [Config.node, config],
-    ],
+  Layer.merge(
+    AppNodeBuilder.build(
+      LayerNode.group([
+        Database.node,
+        EventV2.node,
+        QuestionV2.node,
+        SessionProjector.node,
+        SessionStore.node,
+        ApplicationTools.node,
+        AgentV2.node,
+        ToolRegistry.node,
+        ToolRegistry.toolsNode,
+        echoNode,
+        SessionRunnerModel.node,
+        SystemContextRegistry.node,
+        SkillGuidance.node,
+        ReferenceGuidance.node,
+        Config.node,
+        Snapshot.node,
+        SessionRunnerLLM.node,
+        SessionExecution.node,
+        SessionV2.node,
+      ]),
+      [
+        [LayerNodePlatform.llmClient, client],
+        [PermissionV2.node, permission],
+        [SessionRunnerModel.node, models],
+        [SystemContextRegistry.node, systemContext],
+        [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
+        [SkillGuidance.node, skillGuidance],
+        [ReferenceGuidance.node, referenceGuidance],
+        [Snapshot.node, Snapshot.noopLayer],
+        [SessionExecution.node, execution],
+        [Config.node, config],
+      ],
+    ),
+    Layer.succeed(DatabaseSchema.Schema, SchemaSqliteNamespace.namespace),
   ),
 )
 const sessionID = SessionV2.ID.make("ses_runner_test")
@@ -294,6 +299,7 @@ const otherSessionID = SessionV2.ID.make("ses_runner_other")
 const insertSession = (id: SessionV2.ID) =>
   Effect.gen(function* () {
     const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
     yield* db
       .insert(SessionTable)
       .values({
@@ -311,6 +317,7 @@ const insertSession = (id: SessionV2.ID) =>
 
 const setup = Effect.gen(function* () {
   const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
   response = []
   systemBaseline = "Initial context"
   systemRemoved = false
@@ -370,6 +377,7 @@ const systemTexts = (request: LLMRequest) => messageTexts(request, "system")
 const replaySessionProjection = (id: SessionV2.ID) =>
   Effect.gen(function* () {
     const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
     const events = yield* EventV2.Service
     const recorded = yield* db
       .select()
@@ -485,6 +493,7 @@ const verifyEphemeralDeltas = (kind: FragmentKind) =>
     yield* session.resume(sessionID)
 
     const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
     const deltas = yield* db
       .select({ type: EventTable.type })
       .from(EventTable)
@@ -660,6 +669,7 @@ describe("SessionRunnerLLM", () => {
       yield* setup
       const session = yield* SessionV2.Service
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       const messageID = SessionMessage.ID.create()
       systemUnavailable = true
       yield* session.prompt({ id: messageID, sessionID, prompt: Prompt.make({ text: "First" }), resume: false })
@@ -670,7 +680,7 @@ describe("SessionRunnerLLM", () => {
       expect(Exit.isFailure(exit)).toBe(true)
       if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(SystemContext.InitializationBlocked)
       expect(requests).toHaveLength(0)
-      expect(yield* SessionInput.hasPending(db, sessionID, "steer")).toBe(true)
+      expect(yield* SessionInput.hasPending(db, schema, sessionID, "steer")).toBe(true)
       expect(
         yield* db
           .select()
@@ -693,6 +703,7 @@ describe("SessionRunnerLLM", () => {
       const session = yield* SessionV2.Service
       const events = yield* EventV2.Service
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "First" }), resume: false })
       requests.length = 0
       response = []
@@ -716,7 +727,7 @@ describe("SessionRunnerLLM", () => {
 
       expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
       expect(requests).toHaveLength(1)
-      expect(yield* SessionInput.hasPending(db, sessionID, "steer")).toBe(true)
+      expect(yield* SessionInput.hasPending(db, schema, sessionID, "steer")).toBe(true)
     }),
   )
 
@@ -725,6 +736,7 @@ describe("SessionRunnerLLM", () => {
       yield* setup
       const session = yield* SessionV2.Service
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "First" }), resume: false })
       response = []
       yield* session.resume(sessionID)
@@ -766,6 +778,7 @@ describe("SessionRunnerLLM", () => {
       expect(requests[1]?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Changed context" }])
       expect(yield* session.messages({ sessionID })).toHaveLength(3)
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       expect(
         yield* db
           .select({ id: EventTable.id })
@@ -831,6 +844,7 @@ describe("SessionRunnerLLM", () => {
     Effect.gen(function* () {
       yield* setup
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       const agent = yield* AgentV2.Service
       yield* agent.transform((editor) =>
         editor.update(AgentV2.ID.make("reviewer"), (agent) => {
@@ -1964,6 +1978,7 @@ describe("SessionRunnerLLM", () => {
       yield* setup
       const session = yield* SessionV2.Service
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Interrupt current work" }), resume: false })
 
       requests.length = 0
@@ -1988,7 +2003,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.interrupt(sessionID)
       expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
       expect(requests).toHaveLength(1)
-      expect(yield* SessionInput.hasPending(db, sessionID, "queue")).toBe(true)
+      expect(yield* SessionInput.hasPending(db, schema, sessionID, "queue")).toBe(true)
       const resumed = yield* session.resume(sessionID).pipe(Effect.forkChild)
       while (requests.length < 2) yield* Effect.yieldNow
       yield* Deferred.succeed(streamGate, undefined)
@@ -2007,6 +2022,7 @@ describe("SessionRunnerLLM", () => {
       yield* setup
       const session = yield* SessionV2.Service
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Interrupt current work" }), resume: false })
 
       requests.length = 0
@@ -2030,7 +2046,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.interrupt(sessionID)
       expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
       expect(requests).toHaveLength(1)
-      expect(yield* SessionInput.hasPending(db, sessionID, "steer")).toBe(true)
+      expect(yield* SessionInput.hasPending(db, schema, sessionID, "steer")).toBe(true)
 
       const resumed = yield* session.resume(sessionID).pipe(Effect.forkChild)
       while (requests.length < 2) yield* Effect.yieldNow
@@ -2262,7 +2278,8 @@ describe("SessionRunnerLLM", () => {
       const session = yield* SessionV2.Service
       const events = yield* EventV2.Service
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Recover interrupted tool" }), resume: false })
-      yield* SessionInput.promoteSteers((yield* Database.Service).db, events, sessionID, Number.MAX_SAFE_INTEGER)
+      const schema = yield* DatabaseSchema.Schema
+      yield* SessionInput.promoteSteers((yield* Database.Service).db, schema, events, sessionID, Number.MAX_SAFE_INTEGER)
       const assistantMessageID = SessionMessage.ID.create()
       yield* events.publish(SessionEvent.Step.Started, {
         sessionID,
@@ -2326,7 +2343,8 @@ describe("SessionRunnerLLM", () => {
         prompt: Prompt.make({ text: "Recover interrupted hosted tool" }),
         resume: false,
       })
-      yield* SessionInput.promoteSteers((yield* Database.Service).db, events, sessionID, Number.MAX_SAFE_INTEGER)
+      const schema = yield* DatabaseSchema.Schema
+      yield* SessionInput.promoteSteers((yield* Database.Service).db, schema, events, sessionID, Number.MAX_SAFE_INTEGER)
       const assistantMessageID = SessionMessage.ID.create()
       yield* events.publish(SessionEvent.Step.Started, {
         sessionID,
@@ -2386,7 +2404,8 @@ describe("SessionRunnerLLM", () => {
         prompt: Prompt.make({ text: "Recover interrupted tool input" }),
         resume: false,
       })
-      yield* SessionInput.promoteSteers((yield* Database.Service).db, events, sessionID, Number.MAX_SAFE_INTEGER)
+      const schema = yield* DatabaseSchema.Schema
+      yield* SessionInput.promoteSteers((yield* Database.Service).db, schema, events, sessionID, Number.MAX_SAFE_INTEGER)
       const assistantMessageID = SessionMessage.ID.create()
       yield* events.publish(SessionEvent.Step.Started, {
         sessionID,

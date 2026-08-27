@@ -3,12 +3,14 @@ export * as SessionStore from "./store"
 import { eq } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
+import * as DatabaseSchema from "../database/schema.pg"
+import { EventV2 } from "../event"
 import { makeGlobalNode } from "../effect/app-node"
+import { node as SchemaNode } from "../schema-node"
 import { SessionHistory } from "./history"
 import { MessageDecodeError } from "./error"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
-import { SessionMessageTable, SessionTable } from "./sql"
 import { fromRow } from "./info"
 
 export interface Interface {
@@ -29,6 +31,10 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const { db } = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    const events = yield* EventV2.Service
+    const SessionTable = schema.SessionTable
+    const SessionMessageTable = schema.SessionMessageTable
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
 
     return Service.of({
@@ -37,10 +43,10 @@ const layer = Layer.effect(
         return row ? fromRow(row) : undefined
       }),
       context: Effect.fn("SessionStore.context")(function* (sessionID) {
-        return yield* SessionHistory.load(db, sessionID)
+        return yield* SessionHistory.load(db, schema, sessionID).pipe(Effect.provideService(EventV2.Service, events))
       }),
       runnerContext: Effect.fn("SessionStore.runnerContext")(function* (sessionID, baselineSeq) {
-        return yield* SessionHistory.loadForRunner(db, sessionID, baselineSeq)
+        return yield* SessionHistory.loadForRunner(db, schema, sessionID, baselineSeq)
       }),
       message: Effect.fn("SessionStore.message")(function* (messageID) {
         const row = yield* db
@@ -60,4 +66,8 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer, deps: [Database.node] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer: layer as unknown as Layer.Layer<Service, never, never>,
+  deps: [Database.node, SchemaNode, EventV2.node],
+})

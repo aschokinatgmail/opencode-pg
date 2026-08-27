@@ -174,3 +174,16 @@ export const SessionContextEpochTable = sqliteTable("session_context_epoch", {
   snapshot: text({ mode: "json" }).notNull().$type<SystemContext.Snapshot>(),
   baseline_seq: integer().notNull(),
 })
+
+// T3 (Memo #2): async-tier flush checkpoint. Derived bookkeeping —
+// batch + checkpoint advance share ONE async transaction (HARD rule).
+// Dual-dialect sibling of session/sql.pg.ts SessionProjectionCheckpointTable.
+// T-A epoch discipline: integer timestamp (numbers in/out), matching the
+// SQLite Timestamps helper contract.
+export const SessionProjectionCheckpointTable = sqliteTable("session_projection_checkpoint", {
+  session_id: text().$type<SessionSchema.ID>().primaryKey(),
+  applied_seq: integer().notNull(),
+  time_updated: integer()
+    .notNull()
+    .$default(() => Date.now()),
+})

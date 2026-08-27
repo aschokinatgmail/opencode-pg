@@ -207,6 +207,8 @@ export namespace Text {
   export type Started = typeof Started.Type
 
   // Stream fragments are live-only; Text.Ended is the replayable full-value boundary.
+  // Memo #16 ruling: deltas are never durable, never projected, never flushed.
+  // The async tier is Tool.Progress only; Text.Delta has no projector registration.
   export const Delta = Event.define({
     type: "session.next.text.delta",
     schema: {
@@ -245,6 +247,7 @@ export namespace Reasoning {
   export type Started = typeof Started.Type
 
   // Stream fragments are live-only; Reasoning.Ended is the replayable full-value boundary.
+  // Memo #16 ruling: deltas are never durable, never projected, never flushed.
   export const Delta = Event.define({
     type: "session.next.reasoning.delta",
     schema: {

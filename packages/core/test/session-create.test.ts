@@ -4,6 +4,8 @@ import { Effect, Layer, Stream } from "effect"
 import { AgentV2 } from "@opencode-ai/core/agent"
 import { asc, eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
+import * as DatabaseSchema from "@opencode-ai/core/database/schema.pg"
+import * as SchemaSqliteNamespace from "@opencode-ai/core/schema-sqlite-namespace"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -36,12 +38,15 @@ const projects = Layer.succeed(
   }),
 )
 const it = testEffect(
-  AppNodeBuilder.build(
-    LayerNode.group([Database.node, EventV2.node, SessionProjector.node, SessionStore.node, SessionV2.node]),
-    [
-      [ProjectV2.node, projects],
-      [SessionExecution.node, SessionExecution.noopLayer],
-    ],
+  Layer.merge(
+    AppNodeBuilder.build(
+      LayerNode.group([Database.node, EventV2.node, SessionProjector.node, SessionStore.node, SessionV2.node]),
+      [
+        [ProjectV2.node, projects],
+        [SessionExecution.node, SessionExecution.noopLayer],
+      ],
+    ),
+    Layer.succeed(DatabaseSchema.Schema, SchemaSqliteNamespace.namespace),
   ),
 )
 const location = Location.Ref.make({ directory: AbsolutePath.make("/project") })
@@ -195,9 +200,10 @@ describe("SessionV2.create", () => {
       const session = yield* SessionV2.Service
       const events = yield* EventV2.Service
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
       const created = yield* session.create({ location })
       yield* session.prompt({ sessionID: created.id, prompt: Prompt.make({ text: "Hello" }), resume: false })
-      yield* SessionInput.promoteSteers(db, events, created.id, Number.MAX_SAFE_INTEGER)
+      yield* SessionInput.promoteSteers(db, schema, events, created.id, Number.MAX_SAFE_INTEGER)
 
       expect(
         Array.from(yield* session.events({ sessionID: created.id }).pipe(Stream.take(2), Stream.runCollect)),
@@ -213,13 +219,14 @@ describe("SessionV2.create", () => {
       const session = yield* SessionV2.Service
       const sourceEvents = yield* EventV2.Service
       const sourceDb = (yield* Database.Service).db
+      const sourceSchema = yield* DatabaseSchema.Schema
       const created = yield* session.create({ id: SessionV2.ID.make("ses_fresh_target_replay"), location })
       const admitted = yield* session.prompt({
         sessionID: created.id,
         prompt: Prompt.make({ text: "Replay lifecycle" }),
         resume: false,
       })
-      yield* SessionInput.promoteSteers(sourceDb, sourceEvents, created.id, Number.MAX_SAFE_INTEGER)
+      yield* SessionInput.promoteSteers(sourceDb, sourceSchema, sourceEvents, created.id, Number.MAX_SAFE_INTEGER)
       const serialized = (yield* sourceDb
         .select()
         .from(EventTable)
@@ -246,6 +253,7 @@ describe("SessionV2.create", () => {
 
       yield* Effect.gen(function* () {
         const db = (yield* Database.Service).db
+        const schema = yield* DatabaseSchema.Schema
         const events = yield* EventV2.Service
         const store = yield* SessionStore.Service
         yield* db
@@ -256,7 +264,7 @@ describe("SessionV2.create", () => {
 
         expect(yield* store.get(created.id)).toBeUndefined()
         expect(yield* events.replayAll(serialized.slice(0, 2))).toBe(created.id)
-        expect(yield* SessionInput.find(db, admitted.id)).toMatchObject({
+        expect(yield* SessionInput.find(db, schema, admitted.id)).toMatchObject({
           id: admitted.id,
           sessionID: created.id,
           prompt: { text: "Replay lifecycle" },
@@ -266,7 +274,7 @@ describe("SessionV2.create", () => {
         expect(yield* store.context(created.id)).toEqual([])
 
         expect(yield* events.replayAll(serialized.slice(2))).toBe(created.id)
-        expect(yield* SessionInput.find(db, admitted.id)).toMatchObject({
+        expect(yield* SessionInput.find(db, schema, admitted.id)).toMatchObject({
           id: admitted.id,
           sessionID: created.id,
           prompt: { text: "Replay lifecycle" },

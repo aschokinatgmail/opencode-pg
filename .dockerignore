@@ -1,5 +1,6 @@
 .git
 .opencode
+!.opencode/db-migrations
 .sst
 .turbo
 .wrangler

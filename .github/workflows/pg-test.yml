@@ -1,0 +1,149 @@
+name: pg-test
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ format('{0}-{1}', github.workflow, github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pg-suite:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Run PG suites (TEST_DATABASE_URL exported, zero-test=fail)
+        working-directory: packages/core
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/opencode_test
+        run: |
+          # Start ephemeral postgres:17-alpine
+          docker run -d --name pg-test \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=opencode_test \
+            -p 5432:5432 \
+            postgres:17-alpine
+
+          # Wait for health — fail fast if the container never becomes ready
+          # (bounded wait; silent proceed would mask a dead DB and let every
+          # suite report connect errors as zero-test failures instead of one
+          # clear container failure).
+          HEALTHY=false
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U postgres 2>/dev/null; then
+              HEALTHY=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$HEALTHY" != "true" ]; then
+            echo "ERROR: postgres container never became healthy within 30s"
+            docker rm -f pg-test 2>/dev/null || true
+            exit 1
+          fi
+
+          # Run PG-gated suites — FM-18/28 discipline: TEST_DATABASE_URL
+          # exported; a 0-test run counts as failure (zero-test=fail rule).
+          # The wrapper below counts test results and exits non-zero if 0
+          # OR if the suite itself exits non-zero (failing tests must NOT
+          # be swallowed by `|| true`).
+          TEST_FILES=(
+            "test/database-pg.test.ts"
+            "test/flush-pg.test.ts"
+            "test/wake-pg.test.ts"
+            "test/wake-receive-pg.test.ts"
+            "test/session-pg-roundtrip.test.ts"
+            "test/dialect-matrix.test.ts"
+          )
+
+          TOTAL_TESTS=0
+          for file in "${TEST_FILES[@]}"; do
+            set +e
+            OUTPUT=$(bun test "$file" 2>&1)
+            TEST_EXIT=$?
+            set -e
+            echo "$OUTPUT"
+            # Extract test count from "Ran N tests across M files"
+            COUNT=$(echo "$OUTPUT" | grep -o 'Ran [0-9]*' | grep -o '[0-9]*' | head -1)
+            COUNT=${COUNT:-0}
+            if [ "$COUNT" -eq 0 ]; then
+              echo "ERROR: $file ran 0 tests (zero-test=fail rule, FM-18/28)"
+              docker rm -f pg-test 2>/dev/null || true
+              exit 1
+            fi
+            if [ "$TEST_EXIT" -ne 0 ]; then
+              echo "ERROR: $file exited non-zero ($TEST_EXIT) — failing tests"
+              docker rm -f pg-test 2>/dev/null || true
+              exit 1
+            fi
+            TOTAL_TESTS=$((TOTAL_TESTS + COUNT))
+          done
+
+          echo "Total PG tests ran: $TOTAL_TESTS"
+          if [ "$TOTAL_TESTS" -eq 0 ]; then
+            echo "ERROR: zero tests ran across all PG suites (FM-18/28)"
+            docker rm -f pg-test 2>/dev/null || true
+            exit 1
+          fi
+
+          docker rm -f pg-test 2>/dev/null || true
+
+      - name: Run SQLite-leg suites (TEST_DATABASE_URL and DATABASE_URL unset, zero-test=fail)
+        working-directory: packages/core
+        env:
+          TEST_DATABASE_URL: ""
+          DATABASE_URL: ""
+        run: |
+          # SQLite leg — both dialects gated in ONE authoritative workflow
+          # (Memo #17 Cond 4). Clean env: TEST_DATABASE_URL and DATABASE_URL
+          # both unset so isPg stays false and the SQLite leg of
+          # dialect-matrix runs (the PG leg early-returns). The grep-guard
+          # runs under the same env to verify the static-import ban.
+          # Same zero-test/failing-test rules as the PG leg.
+          SQLITE_TEST_FILES=(
+            "test/dialect-matrix.test.ts"
+            "test/grep-guard.test.ts"
+          )
+
+          TOTAL_TESTS=0
+          for file in "${SQLITE_TEST_FILES[@]}"; do
+            set +e
+            OUTPUT=$(bun test "$file" 2>&1)
+            TEST_EXIT=$?
+            set -e
+            echo "$OUTPUT"
+            COUNT=$(echo "$OUTPUT" | grep -o 'Ran [0-9]*' | grep -o '[0-9]*' | head -1)
+            COUNT=${COUNT:-0}
+            if [ "$COUNT" -eq 0 ]; then
+              echo "ERROR: $file ran 0 tests (zero-test=fail rule, FM-18/28)"
+              exit 1
+            fi
+            if [ "$TEST_EXIT" -ne 0 ]; then
+              echo "ERROR: $file exited non-zero ($TEST_EXIT) — failing tests"
+              exit 1
+            fi
+            TOTAL_TESTS=$((TOTAL_TESTS + COUNT))
+          done
+
+          echo "Total SQLite-leg tests ran: $TOTAL_TESTS"
+          if [ "$TOTAL_TESTS" -eq 0 ]; then
+            echo "ERROR: zero tests ran across all SQLite-leg suites (FM-18/28)"
+            exit 1
+          fi

@@ -3,6 +3,8 @@ import { Cause, Effect, Exit, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import * as TestClock from "effect/testing/TestClock"
 import * as TestConsole from "effect/testing/TestConsole"
+import * as DatabaseSchema from "../../src/database/schema.pg"
+import * as SchemaSqliteNamespace from "../../src/schema-sqlite-namespace"
 
 type Body<A, E, R> = Effect.Effect<A, E, R> | (() => Effect.Effect<A, E, R>)
 
@@ -47,7 +49,14 @@ const testEnv = Layer.mergeAll(TestConsole.layer, TestClock.layer())
 // Live environment - uses real clock, but keeps TestConsole for output capture
 const liveEnv = TestConsole.layer
 
-export const it = make(testEnv, liveEnv)
+// Schema namespace — provided to all test layers so consumers that yield
+// DatabaseSchema.Schema resolve to the SQLite namespace at runtime.
+const schemaLayer = Layer.succeed(DatabaseSchema.Schema, SchemaSqliteNamespace.namespace)
+
+export const it = make(Layer.merge(testEnv, schemaLayer), Layer.merge(liveEnv, schemaLayer))
 
 export const testEffect = <R, E>(layer: Layer.Layer<R, E>) =>
-  make(Layer.provideMerge(layer, testEnv), Layer.provideMerge(layer, liveEnv))
+  make(
+    Layer.provideMerge(Layer.merge(layer, schemaLayer), testEnv),
+    Layer.provideMerge(Layer.merge(layer, schemaLayer), liveEnv),
+  )

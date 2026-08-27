@@ -3,9 +3,10 @@ export * as PermissionSaved from "./saved"
 import { eq } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
+import * as DatabaseSchema from "../database/schema.pg"
 import { makeGlobalNode } from "../effect/app-node"
+import { node as SchemaNode } from "../schema-node"
 import { ProjectV2 } from "../project"
-import { PermissionTable } from "./sql"
 import { PermissionSaved } from "@opencode-ai/schema/permission-saved"
 
 export const ID = PermissionSaved.ID
@@ -38,6 +39,8 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const { db } = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    const PermissionTable = schema.PermissionTable
 
     const list = Effect.fn("PermissionSaved.list")(function* (input?: ListInput) {
       const rows = yield* db
@@ -76,4 +79,8 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer, deps: [Database.node] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer: layer as unknown as Layer.Layer<Service, never, never>,
+  deps: [Database.node, SchemaNode],
+})

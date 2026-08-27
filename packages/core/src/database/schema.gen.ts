@@ -155,6 +155,13 @@ export default {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`session_projection_checkpoint\` (
+          \`session_id\` text PRIMARY KEY,
+          \`applied_seq\` integer NOT NULL,
+          \`time_updated\` integer NOT NULL
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`session_input\` (
           \`id\` text PRIMARY KEY,
           \`session_id\` text NOT NULL,

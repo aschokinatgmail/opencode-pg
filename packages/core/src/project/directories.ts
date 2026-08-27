@@ -3,10 +3,11 @@ export * as ProjectDirectories from "./directories"
 import { and, asc, desc, eq, isNotNull, isNull, ne, or } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
+import * as DatabaseSchema from "../database/schema.pg"
 import { makeGlobalNode } from "../effect/app-node"
+import { node as SchemaNode } from "../schema-node"
 import { AbsolutePath, optional } from "../schema"
 import { ProjectSchema } from "./schema"
-import { ProjectDirectoryTable } from "./sql"
 import type { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
 
 export interface Directory {
@@ -61,6 +62,8 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const db = (yield* Database.Service).db
+    const schema = yield* DatabaseSchema.Schema
+    const ProjectDirectoryTable = schema.ProjectDirectoryTable
 
     const create = Effect.fn("ProjectDirectories.create")(function* (input: CreateInput, tx?: Transaction) {
       const insert = (tx ?? db)
@@ -155,4 +158,8 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [Database.node] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer: layer as unknown as Layer.Layer<Service, never, never>,
+  deps: [Database.node, SchemaNode],
+})

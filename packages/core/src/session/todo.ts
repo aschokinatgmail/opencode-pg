@@ -4,10 +4,11 @@ import { asc, eq } from "drizzle-orm"
 import { Context, Effect, Layer } from "effect"
 import { SessionTodo } from "@opencode-ai/schema/session-todo"
 import { Database } from "../database/database"
+import * as DatabaseSchema from "../database/schema.pg"
 import { makeLocationNode } from "../effect/app-node"
+import { node as SchemaNode } from "../schema-node"
 import { EventV2 } from "../event"
 import { SessionSchema } from "./schema"
-import { TodoTable } from "./sql"
 
 export const Info = SessionTodo.Info
 export type Info = typeof Info.Type
@@ -27,6 +28,8 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const { db } = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    const TodoTable = schema.TodoTable
     const events = yield* EventV2.Service
 
     const update = Effect.fn("SessionTodo.update")(function* (input: {
@@ -75,4 +78,8 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [EventV2.node, Database.node] })
+export const node = makeLocationNode({
+  service: Service,
+  layer: layer as unknown as Layer.Layer<Service, never, never>,
+  deps: [EventV2.node, Database.node, SchemaNode],
+})

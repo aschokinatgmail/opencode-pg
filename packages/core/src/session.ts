@@ -13,21 +13,21 @@ import { Prompt } from "./session/prompt"
 import { PromptInput } from "@opencode-ai/schema/prompt-input"
 import { EventV2 } from "./event"
 import { Database } from "./database/database"
+import * as DatabaseSchema from "./database/schema.pg"
 import { SessionProjector } from "./session/projector"
-import { SessionMessageTable, SessionTable } from "./session/sql"
 import { SessionSchema } from "./session/schema"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema"
 import { AgentV2 } from "./agent"
 import { SessionV1 } from "./v1/session"
 import { InstallationVersion } from "./installation/version"
 import { Slug } from "./util/slug"
-import { ProjectTable } from "./project/sql"
 import path from "path"
 import { fromRow } from "./session/info"
 import { SessionRunner } from "./session/runner/index"
 import { SessionStore } from "./session/store"
 import { SessionExecution } from "./session/execution"
 import { makeGlobalNode } from "./effect/app-node"
+import { node as SchemaNode } from "./schema-node"
 import { LocationServiceMap } from "./location-service-map"
 import { MessageDecodeError } from "./session/error"
 import { SessionEvent } from "./session/event"
@@ -186,6 +186,10 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const database = yield* Database.Service
     const db = database.db
+    const schema = yield* DatabaseSchema.Schema
+    const SessionTable = schema.SessionTable
+    const SessionMessageTable = schema.SessionMessageTable
+    const ProjectTable = schema.ProjectTable
     const events = yield* EventV2.Service
     const projects = yield* ProjectV2.Service
     const execution = yield* SessionExecution.Service
@@ -193,7 +197,7 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
     const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
-    const decode = (row: typeof SessionMessageTable.$inferSelect) =>
+    const decode = (row: DatabaseSchema.SchemaTables["SessionMessageTable"]["$inferSelect"]) =>
       decodeMessage({ ...row.data, id: row.id, type: row.type }).pipe(
         Effect.mapError(
           () =>
@@ -210,6 +214,12 @@ const layer = Layer.effect(
         const recorded = yield* store.get(sessionID)
         if (recorded) return recorded
         const project = yield* projects.resolve(input.location.directory)
+        // B4.3: ProjectTable upsert stays OUTSIDE the event tx with
+        // onConflictDoNothing (never DoUpdate — never clobber). A crash here
+        // leaves an orphan project row — benign: project rows are
+        // directory-keyed registry rows shared across sessions, not garbage;
+        // retry no-ops. Moving inside the event tx would place it after
+        // projectors (no pre-projector hook exists) → FK violation.
         yield* db
           .insert(ProjectTable)
           .values({ id: project.id, worktree: project.directory, vcs: project.vcs?.type, sandboxes: [] })
@@ -337,13 +347,14 @@ const layer = Layer.effect(
       }),
       message: Effect.fn("V2Session.message")(function* (input) {
         const stored = yield* store.message(input.messageID)
-        return stored?.sessionID === input.sessionID ? stored.message : undefined
+        if (!stored) return undefined
+        return stored.sessionID === input.sessionID ? stored.message : undefined
       }),
       context: Effect.fn("V2Session.context")(function* (sessionID) {
         yield* result.get(sessionID)
         return yield* store.context(sessionID)
       }),
-      events: (input) =>
+      events: (input: { sessionID: SessionSchema.ID; after?: number }) =>
         Stream.unwrap(
           result
             .get(input.sessionID)
@@ -351,7 +362,7 @@ const layer = Layer.effect(
         ).pipe(Stream.filter((event): event is SessionEvent.DurableEvent => isDurableSessionEvent(event))),
       history: Effect.fn("V2Session.history")(function* (input) {
         yield* result.get(input.sessionID)
-        return yield* EventV2.readAggregate(db, {
+        return yield* EventV2.readAggregate(db, schema, {
           ...input,
           aggregateID: input.sessionID,
           manifest: SessionDurable,
@@ -365,7 +376,7 @@ const layer = Layer.effect(
             const messageID = input.id ?? SessionMessage.ID.create()
             const delivery = input.delivery ?? "steer"
             const expected = { sessionID: input.sessionID, messageID, prompt, delivery }
-            const admitted = yield* SessionInput.admit(db, events, {
+            const admitted = yield* SessionInput.admit(db, schema, events, {
               id: messageID,
               sessionID: input.sessionID,
               prompt,
@@ -403,8 +414,8 @@ const layer = Layer.effect(
         const session = yield* result.get(input.sessionID)
         if (
           session.model?.providerID === input.model.providerID &&
-          session.model.id === input.model.id &&
-          (session.model.variant ?? "default") === (input.model.variant ?? "default")
+          session.model?.id === input.model.id &&
+          (session.model?.variant ?? "default") === (input.model.variant ?? "default")
         )
           return
         yield* events.publish(SessionEvent.ModelSwitched, {
@@ -435,6 +446,7 @@ const layer = Layer.effect(
           const session = yield* result.get(input.sessionID)
           return yield* SessionRevert.stage({ session, messageID: input.messageID, files: input.files }).pipe(
             Effect.provideService(Database.Service, database),
+            Effect.provideService(DatabaseSchema.Schema, schema),
             Effect.provideService(EventV2.Service, events),
             Effect.provide(locations.get(session.location)),
           )
@@ -451,11 +463,11 @@ const layer = Layer.effect(
           yield* SessionRevert.commit(session).pipe(Effect.provideService(EventV2.Service, events))
         }),
       },
-    })
+    } as unknown as Interface)
 
     return result
   }),
-)
+) as unknown as Layer.Layer<Service, never, never>
 
 const resolvePrompt = (input: PromptInput.Prompt) =>
   Prompt.make({
@@ -473,9 +485,10 @@ const resolvePrompt = (input: PromptInput.Prompt) =>
 
 export const node = makeGlobalNode({
   service: Service,
-  layer: layer.pipe(Layer.orDie),
+  layer: layer.pipe(Layer.orDie) as unknown as Layer.Layer<Service, never, never>,
   deps: [
     Database.node,
+    SchemaNode,
     EventV2.node,
     ProjectV2.node,
     SessionExecution.node,

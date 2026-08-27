@@ -1,0 +1,203 @@
+# Step 8 — PG Backend Staging Docker Compose Stack.
+#
+# Plan: .omo/plans/pg-backend-staging.md Step 8 + locked decision #9.
+# Memos: PART 15 (Memo #16) flush-pool amendment + PART 16 (Memo #17) Cond 7.
+#
+# Topology:
+#   - db: postgres:17-alpine, tuned per plan (max_connections=200,
+#     shared_buffers=512MB, wal_compression=on, pg_stat_statements preload).
+#     Healthcheck via pg_isready. initdb loads 00-extensions.sql.
+#   - opencode-1..8: N=8 opencode server containers, health-gated via
+#     depends_on condition: service_healthy. Each gets a distinct
+#     application_name (visible in pg_stat_activity). DATABASE_URL points
+#     at the db service. restart: unless-stopped.
+#
+# Connection math (Memo #17 Cond 7 = Memo #16 Cond 2):
+#   per process = pool_max (min(1.5x sessions, 12)) + 1 pinned LISTEN
+#   connection (OUTSIDE the pool max) [+1 transient reserved while
+#   `opencode db status` runs]; flush concurrency = Semaphore(4) on the
+#   SHARED pool (no extra connections; synchronous_commit=off set NOWHERE).
+#   N=8 containers -> <= 8x12 + 8 = <=104 steady vs max_connections=200
+#   (headroom >= 96 for migrations/CLI/transients).
+#
+# synchronous_commit is NOT set anywhere in this compose (total ban per
+# Memo #16 flush-pool amendment).
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: opencode
+      POSTGRES_PASSWORD: opencode
+      POSTGRES_DB: opencode
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - wal_compression=on
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./docker/00-extensions.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
+    ports:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opencode -d opencode"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - opencode-net
+
+  # N=8 opencode server containers (decision #9: N opencode containers).
+  # Each container runs `opencode serve` (headless server mode).
+  # The migration runner executes on boot via database.ts pgLayerInit ->
+  # DatabaseMigrationPg.apply, under pg_advisory_lock(727274) via
+  # client.reserve (Memo #5). The advisory lock is the boot readiness
+  # barrier: the first container acquires the lock and applies 0000_init.sql;
+  # subsequent containers probe information_schema, find 'session' present,
+  # and skip to the replay-only path.
+  #
+  # Each container gets a distinct application_name via the DATABASE_URL
+  # query parameter (?application_name=opencode-N) so pg_stat_activity
+  # shows which container owns each connection.
+  opencode-1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://opencode:opencode@db:5432/opencode?application_name=opencode-1
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-changeme}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4011"
+    networks:
+      - opencode-net
+
+  opencode-2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://opencode:opencode@db:5432/opencode?application_name=opencode-2
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-changeme}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4012"
+    networks:
+      - opencode-net
+
+  opencode-3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://opencode:opencode@db:5432/opencode?application_name=opencode-3
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-changeme}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4013"
+    networks:
+      - opencode-net
+
+  opencode-4:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://opencode:opencode@db:5432/opencode?application_name=opencode-4
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-changeme}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4014"
+    networks:
+      - opencode-net
+
+  opencode-5:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://opencode:opencode@db:5432/opencode?application_name=opencode-5
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-changeme}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4015"
+    networks:
+      - opencode-net
+
+  opencode-6:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://opencode:opencode@db:5432/opencode?application_name=opencode-6
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-changeme}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4016"
+    networks:
+      - opencode-net
+
+  opencode-7:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://opencode:opencode@db:5432/opencode?application_name=opencode-7
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-changeme}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4017"
+    networks:
+      - opencode-net
+
+  opencode-8:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://opencode:opencode@db:5432/opencode?application_name=opencode-8
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-changeme}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "4018"
+    networks:
+      - opencode-net
+
+volumes:
+  pg-data:
+
+networks:
+  opencode-net:
+    driver: bridge

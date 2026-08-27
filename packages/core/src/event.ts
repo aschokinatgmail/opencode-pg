@@ -3,13 +3,20 @@ export * as EventV2 from "./event"
 import { Cause, Context, Effect, Layer, Option, PubSub, Queue, Schema, Stream } from "effect"
 import { Event } from "@opencode-ai/schema/event"
 import type { Data, Definition, Payload } from "@opencode-ai/schema/event"
-import { and, asc, eq, gt, inArray } from "drizzle-orm"
+import { and, asc, eq, gt, inArray, sql } from "drizzle-orm"
 import { Database } from "./database/database"
-import { EventSequenceTable, EventTable } from "./event/sql"
+import { Wake } from "./database/wake"
+import { Lock } from "./database/lock"
+import { Flush } from "./database/flush"
+import { isPg } from "./database/database"
+import type { SchemaTables } from "./database/schema.pg"
+import * as DatabaseSchema from "./database/schema.pg"
 import { Location } from "./location"
 import { makeGlobalNode } from "./effect/app-node"
+import { node as SchemaNode } from "./schema-node"
 import { isDeepStrictEqual } from "node:util"
 import { Durable } from "@opencode-ai/schema/durable-event-manifest"
+import { Session } from "@opencode-ai/schema/session"
 
 export const ID = Event.ID
 export type ID = import("@opencode-ai/schema/event").ID
@@ -20,8 +27,10 @@ export type Unsubscribe = Effect.Effect<void>
 
 export const latestSequence = Effect.fn("EventV2.latestSequence")(function* (
   db: Database.Interface["db"],
+  schema: SchemaTables,
   aggregateID: string,
 ) {
+  const EventSequenceTable = schema.EventSequenceTable
   const row = yield* db
     .select({ seq: EventSequenceTable.seq })
     .from(EventSequenceTable)
@@ -62,6 +71,7 @@ const decodeSerializedEvent = (event: SerializedEvent): Payload => {
 
 export const readAggregate = Effect.fn("EventV2.readAggregate")(function* <A>(
   db: Database.Interface["db"],
+  schema: SchemaTables,
   input: {
     readonly aggregateID: string
     readonly after?: number
@@ -73,6 +83,7 @@ export const readAggregate = Effect.fn("EventV2.readAggregate")(function* <A>(
   },
 ) {
   const after = input.after ?? -1
+  const EventTable = schema.EventTable
   const rows = yield* db
     .select()
     .from(EventTable)
@@ -145,6 +156,16 @@ export interface Interface {
   ) => Effect.Effect<string | undefined>
   readonly remove: (aggregateID: string) => Effect.Effect<void>
   readonly claim: (aggregateID: string, ownerID: string) => Effect.Effect<void>
+  // T3 (Memo #2) two-tier commit: run deferred async-tier projectors for
+  // unprojected events. Called by the flush tier (database/flush.ts) under
+  // PG, and by flush-on-read (session/history.ts) when lag exceeds threshold.
+  readonly runProjectors: (
+    aggregateID: string,
+    events: ReadonlyArray<{ readonly id: string; readonly aggregate_id: string; readonly seq: number; readonly type: string; readonly data: Record<string, unknown> }>,
+  ) => Effect.Effect<void>
+  // T3 (Memo #2): flush unprojected events for a session (deferred async-tier
+  // projections + checkpoint advance). Idempotent.
+  readonly flush: (aggregateID: string) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Event") {}
@@ -180,6 +201,7 @@ export const layerWith = (options?: LayerOptions) =>
       // TODO: Bind durable projectors to exact type+version before supporting incompatible historical payloads.
       const listeners = new Array<Subscriber>()
       const { db } = yield* Database.Service
+      const schema = yield* DatabaseSchema.Schema
 
       const getOrCreate = (definition: Definition) =>
         Effect.gen(function* () {
@@ -241,9 +263,20 @@ export const layerWith = (options?: LayerOptions) =>
                       () =>
                         Effect.gen(function* () {
                           const row = yield* db
-                            .select({ seq: EventSequenceTable.seq, ownerID: EventSequenceTable.owner_id })
-                            .from(EventSequenceTable)
-                            .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+                            .select({ seq: schema.EventSequenceTable.seq, ownerID: schema.EventSequenceTable.owner_id })
+                            .from(schema.EventSequenceTable)
+                            .where(eq(schema.EventSequenceTable.aggregate_id, aggregateID))
+                            // T2 exact-seq (locked decision #5, Memo #6 B5.3):
+                            // FOR UPDATE on event_sequence serializes concurrent
+                            // commitDurableEvent calls for the same aggregate —
+                            // the correctness mechanism for contiguous seq
+                            // assignment. Under SQLite, writers are already
+                            // serialized by the DB transaction (Semaphore(1));
+                            // drizzle sqlite-core has no .for() method, so the
+                            // PG-only .for("update") is applied via Lock.forUpdate
+                            // (database/lock.ts — single confined cast, Memo #14
+                            // Cond 4). SQLite: identity passthrough.
+                            .pipe(Lock.forUpdate)
                             .get()
                             .pipe(Effect.orDie)
                           const latest = row?.seq ?? -1
@@ -262,8 +295,8 @@ export const layerWith = (options?: LayerOptions) =>
                           if (input && input.seq <= latest) {
                             const stored = yield* db
                               .select()
-                              .from(EventTable)
-                              .where(and(eq(EventTable.aggregate_id, aggregateID), eq(EventTable.seq, input.seq)))
+                              .from(schema.EventTable)
+                              .where(and(eq(schema.EventTable.aggregate_id, aggregateID), eq(schema.EventTable.seq, input.seq)))
                               .get()
                               .pipe(Effect.orDie)
                             if (
@@ -273,9 +306,9 @@ export const layerWith = (options?: LayerOptions) =>
                             ) {
                               if (input.ownerID && row?.ownerID == null) {
                                 yield* db
-                                  .update(EventSequenceTable)
+                                  .update(schema.EventSequenceTable)
                                   .set({ owner_id: input.ownerID })
-                                  .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+                                  .where(eq(schema.EventSequenceTable.aggregate_id, aggregateID))
                                   .run()
                                   .pipe(Effect.orDie)
                               }
@@ -301,9 +334,9 @@ export const layerWith = (options?: LayerOptions) =>
                             )
                           }
                           const stored = yield* db
-                            .select({ aggregateID: EventTable.aggregate_id, seq: EventTable.seq })
-                            .from(EventTable)
-                            .where(eq(EventTable.id, event.id))
+                            .select({ aggregateID: schema.EventTable.aggregate_id, seq: schema.EventTable.seq })
+                            .from(schema.EventTable)
+                            .where(eq(schema.EventTable.id, event.id))
                             .get()
                             .pipe(Effect.orDie)
                           if (stored)
@@ -318,14 +351,20 @@ export const layerWith = (options?: LayerOptions) =>
                             durable: { aggregateID, seq, version: durable.version },
                           } as Payload
                           for (const projector of list) {
+                            // T3 (Memo #2) two-tier commit: skip async-tier
+                            // projectors in the sync event-commit tx under PG.
+                            // They are deferred to the flush tier (database/
+                            // flush.ts). Under SQLite the two-tier collapses
+                            // to synchronous single-tier — all projectors run.
+                            if (isPg && Flush.isAsyncTier(event.type)) continue
                             yield* projector(committed)
                           }
                           if (commit) yield* commit(seq)
                           yield* db
-                            .insert(EventSequenceTable)
+                            .insert(schema.EventSequenceTable)
                             .values([{ aggregate_id: aggregateID, seq, owner_id: input?.ownerID }])
                             .onConflictDoUpdate({
-                              target: EventSequenceTable.aggregate_id,
+                              target: schema.EventSequenceTable.aggregate_id,
                               set: {
                                 seq,
                                 ...(input?.ownerID && row?.ownerID == null ? { owner_id: input.ownerID } : {}),
@@ -334,7 +373,7 @@ export const layerWith = (options?: LayerOptions) =>
                             .run()
                             .pipe(Effect.orDie)
                           yield* db
-                            .insert(EventTable)
+                            .insert(schema.EventTable)
                             .values([
                               {
                                 id: event.id,
@@ -346,6 +385,34 @@ export const layerWith = (options?: LayerOptions) =>
                             ])
                             .run()
                             .pipe(Effect.orDie)
+                          // T3 (Memo #2) two-tier commit: under SQLite (sync
+                          // single-tier collapse), advance the checkpoint to
+                          // the event seq after all projectors have run. Under
+                          // PG the checkpoint is advanced by the deferred
+                          // flush tier (scheduled after commit). Only session
+                          // aggregates have checkpoints (the table FK references
+                          // session.id); test events with non-session aggregate
+                          // IDs skip the checkpoint write.
+                          if (!isPg && aggregateID.startsWith("ses_")) {
+                            yield* db
+                              .insert(schema.SessionProjectionCheckpointTable)
+                              .values({ session_id: Session.ID.make(aggregateID), applied_seq: seq, time_updated: Date.now() })
+                              .onConflictDoUpdate({
+                                target: schema.SessionProjectionCheckpointTable.session_id,
+                                set: {
+                                  applied_seq: sql`CASE WHEN ${schema.SessionProjectionCheckpointTable.applied_seq} > ${seq} THEN ${schema.SessionProjectionCheckpointTable.applied_seq} ELSE ${seq} END`,
+                                  time_updated: Date.now(),
+                                },
+                              })
+                              .run()
+                              .pipe(Effect.orDie)
+                          }
+                          // Memo #1: NOTIFY wake bus — emit inside the
+                          // transaction so the notify fires exactly when
+                          // the commit lands (transactional wakeup). The
+                          // payload is the process tag (tiny); the listener
+                          // self-drops. Under SQLite this no-ops.
+                          yield* Wake.notifyInTransaction(db, aggregateID)
                           return { aggregateID, seq }
                         }),
                       { behavior: "immediate" },
@@ -357,6 +424,13 @@ export const layerWith = (options?: LayerOptions) =>
                       (wake) => PubSub.publish(wake, undefined),
                       { discard: true },
                     )
+                    // T3 (Memo #2) two-tier commit: under PG, schedule the
+                    // deferred flush on the flush pool (not the caller's
+                    // fiber). The flush runs async-tier projectors and
+                    // advances the checkpoint. Under SQLite the checkpoint
+                    // is already written in-tx (single-tier collapse).
+                    if (isPg && committed.aggregateID.startsWith("ses_"))
+                      Flush.scheduleFlush(db, schema, service, committed.aggregateID)
                   }
                   return committed
                 }),
@@ -515,8 +589,8 @@ export const layerWith = (options?: LayerOptions) =>
         return db
           .transaction(() =>
             Effect.gen(function* () {
-              yield* db.delete(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, aggregateID)).run()
-              yield* db.delete(EventTable).where(eq(EventTable.aggregate_id, aggregateID)).run()
+              yield* db.delete(schema.EventSequenceTable).where(eq(schema.EventSequenceTable.aggregate_id, aggregateID)).run()
+              yield* db.delete(schema.EventTable).where(eq(schema.EventTable.aggregate_id, aggregateID)).run()
             }),
           )
           .pipe(Effect.orDie)
@@ -524,9 +598,9 @@ export const layerWith = (options?: LayerOptions) =>
 
       function claim(aggregateID: string, ownerID: string) {
         return db
-          .update(EventSequenceTable)
+          .update(schema.EventSequenceTable)
           .set({ owner_id: ownerID })
-          .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+          .where(eq(schema.EventSequenceTable.aggregate_id, aggregateID))
           .run()
           .pipe(Effect.orDie)
       }
@@ -543,9 +617,9 @@ export const layerWith = (options?: LayerOptions) =>
           Effect.andThen(
             db
               .select()
-              .from(EventTable)
-              .where(and(eq(EventTable.aggregate_id, aggregateID), gt(EventTable.seq, after)))
-              .orderBy(asc(EventTable.seq))
+              .from(schema.EventTable)
+              .where(and(eq(schema.EventTable.aggregate_id, aggregateID), gt(schema.EventTable.seq, after)))
+              .orderBy(asc(schema.EventTable.seq))
               .all(),
           ),
           Effect.orDie,
@@ -619,7 +693,64 @@ export const layerWith = (options?: LayerOptions) =>
           projectors.set(definition.type, list)
         })
 
-      return Service.of({
+      // T3 (Memo #2) two-tier commit: runProjectors replays deferred
+      // async-tier projectors for unprojected events. Called by the flush
+      // tier (database/flush.ts). The projectors are the same registered
+      // callbacks that commitDurableEvent skips for async-tier types under PG.
+      //
+      // FM-30 fix (Memo #15 Cond 1(i)+(ii)): the projector map is keyed by
+      // the UNVERSIONED `definition.type` (see `project` above, :691), but
+      // `row.type` is the VERSIONED DB string (`type.version`, schema/event.ts
+      // versionedType). Looking up by `row.type` misses every time → the async
+      // tier never projected under PG. Resolve via `Durable.get(row.type)` and
+      // look up by `definition.type`. Additionally, skip rows whose definition
+      // type is NOT async-tier (Flush.isAsyncTier): sync-tier events were
+      // already projected in the sync event-commit tx, so re-running their
+      // projectors here would trip SessionAlreadyProjected / LifecycleConflict
+      // (FM-31) and kill flush-on-read. The checkpoint advances over sync-tier
+      // rows WITHOUT re-running anything — it marks async-tier progress.
+      const runProjectors = (
+        aggregateID: string,
+        eventRows: ReadonlyArray<{
+          readonly id: string
+          readonly aggregate_id: string
+          readonly seq: number
+          readonly type: string
+          readonly data: Record<string, unknown>
+        }>,
+      ): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          for (const row of eventRows) {
+            const definition = Durable.get(row.type)
+            if (!definition?.durable) continue
+            // FM-31 guard: only async-tier events are projected by the flush.
+            // Sync-tier events were projected in the sync event-commit tx.
+            if (!Flush.isAsyncTier(definition.type)) continue
+            const payload: Payload = {
+              id: row.id,
+              type: definition.type,
+              durable: { aggregateID: row.aggregate_id, seq: row.seq, version: definition.durable.version },
+              data: Schema.decodeUnknownSync(definition.data)(row.data),
+            } as Payload
+            // FM-30 fix: look up by the UNVERSIONED definition.type, not the
+            // versioned row.type. The projector map is keyed by definition.type.
+            const list = projectors.get(definition.type) ?? []
+            for (const projector of list) {
+              yield* projector(payload)
+            }
+          }
+        })
+
+      // T3 (Memo #2): flush unprojected events for a session. Delegates to
+      // database/flush.ts which claims the checkpoint row FOR UPDATE, reads
+      // unprojected events, calls runProjectors, and advances the checkpoint
+      // — all in ONE db.transaction (Memo #2 Cond 3, Memo #15 Cond 1(iii)+(iv)).
+      const flushSession = (aggregateID: string): Effect.Effect<void> =>
+        Flush.flush(db, schema, service, aggregateID)
+
+      // Self-reference: the service being constructed. commitDurableEvent
+      // uses this to schedule the deferred flush after sync-tier commit.
+      const service = Service.of({
         publish,
         subscribe,
         all: streamAll,
@@ -630,9 +761,12 @@ export const layerWith = (options?: LayerOptions) =>
         replayAll,
         remove,
         claim,
+        runProjectors,
+        flush: flushSession,
       })
+      return service
     }),
   )
 
 const layer = layerWith()
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [Database.node] })
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: [Database.node, SchemaNode] })

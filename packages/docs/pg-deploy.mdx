@@ -1,0 +1,161 @@
+---
+title: PG Backend Deploy Notes
+description: Connection math, pool sizing, and lag-gauge interpretation for the PostgreSQL staging deployment
+---
+
+# PG Backend Deploy Notes
+
+Step 8 of the PG backend staging plan. This document transcribes the
+connection arithmetic and lag-gauge interpretation required by Athena's
+Memo #17 Condition 7 (= Memo #16 Condition 2) and records the flush-pool
+amendment from Memo #16 (PART 15).
+
+## Connection Math
+
+Per Athena Memo #17 Cond 7 (verbatim from `.opencode/db-decision-memos.md`
+PART 15, line 2596):
+
+> per process = pool_max (min(1.5x sessions, 12)) + 1 pinned LISTEN
+> connection (OUTSIDE the pool max) [+1 transient reserved while
+> `opencode db status` runs]; flush concurrency = Semaphore(4) on the
+> SHARED pool (no extra connections; synchronous_commit=off set NOWHERE);
+> N=8 containers -> <= 8x12 + 8 = <=104 steady vs max_connections=200
+> (headroom >= 96); plus the lag-gauge interpretation lines
+> (transient-vs-persistent lag; only Tool.Progress part content can be
+> stale; SQLite structurally 0).
+
+### Breakdown
+
+| Component | Count per process | Notes |
+|---|---|---|
+| Pool connections (pool_max) | min(1.5 x sessions, 12) | Decision #12; the session-count source is not yet wired, so the default is 8 (pg.bun.ts:246). When wired, the formula caps at 12. |
+| Pinned LISTEN connection | 1 | OUTSIDE the pool max (Memo #15 D1 ruling). A dedicated postgres-js instance with max:1, idle_timeout:0 (wake.ts:142). Independent of pool churn. |
+| Transient reserved (CLI) | +1 | Only while `opencode db status` runs; released on completion. |
+| Flush concurrency | Semaphore(4) | On the SHARED transactional pool — no extra connections (Memo #16 flush-pool amendment). |
+
+### N=8 container worst case
+
+```
+N=8 containers
+Per container steady-state: pool_max(12) + 1 listener = 13
+Total steady: 8 x 13 = 104
+max_connections = 200
+Headroom: 200 - 104 = 96 (for migrations, CLI transients, admin)
+```
+
+### synchronous_commit
+
+**synchronous_commit=off is set NOWHERE** — total ban per Memo #16
+flush-pool amendment (PART 15). The landed realization is Semaphore(4) on
+the shared transactional pool; no dedicated flush pool exists. This is
+correctness-safer (no durability relaxation) and decision #6's constraint
+("synchronous_commit=off flush pool only") is satisfied vacuously. A
+dedicated flush pool with synchronous_commit=off remains a future
+performance option, to be re-blessed by memo if taken.
+
+## Lag-Gauge Interpretation
+
+The projection-lag gauge (`es.seq - COALESCE(spc.applied_seq, -1)`,
+flush.ts:91-115; `db status --sessions` panel, db.ts:184) counts ALL
+durable session events not yet checkpoint-advanced, while the work gated
+by the flush is Tool.Progress materialization ONLY (Memo #16 ruling:
+Text.Delta is live-only by design; the async tier is Tool.Progress only).
+
+1. **Transient lag > 0 after every commit is NORMAL under PG.**
+   `scheduleFlush` is fire-and-forget; the flush advances over sync-tier
+   rows without work. A brief non-zero lag is expected between event
+   commit and checkpoint advance.
+
+2. **Persistent or growing lag = broken flush tier.**
+   This indicates a FM-30-class defect (projector death, key mismatch,
+   or starvation). Investigate via `db status --sessions` panel and
+   flush defect logs.
+
+3. **Only Tool.Progress part content can be stale.**
+   Text NEVER lags — Text.Started/Text.Ended, Step, and Tool settlement
+   all project in the sync commit tx. User-visible text content is always
+   current. Only the `progress` field on tool parts (the async-tier
+   projection) can be momentarily behind.
+
+4. **Under SQLite the gauge is structurally 0.**
+   In-tx checkpoint advance (event.ts:396-409) means the checkpoint
+   advances in the same transaction as the event commit. Lag is always 0
+   under SQLite by construction.
+
+## Compose Stack
+
+The `docker-compose.yml` at the repo root defines:
+
+- **db**: `postgres:17-alpine` with `max_connections=200`,
+  `shared_buffers=512MB`, `wal_compression=on`,
+  `shared_preload_libraries=pg_stat_statements`. Healthcheck via
+  `pg_isready`. initdb loads `docker/00-extensions.sql` (creates
+  `pg_stat_statements` extension at cluster init).
+
+- **opencode-1..8**: N=8 opencode server containers, each running
+  `opencode serve`. Health-gated via `depends_on: db: condition:
+  service_healthy`. Each container gets a distinct `application_name`
+  via the DATABASE_URL query parameter
+  (`?application_name=opencode-N`) so `pg_stat_activity` shows which
+  container owns each connection. `restart: unless-stopped`.
+
+### Migration Precheck
+
+The migration runner executes automatically on boot (database.ts
+`pgLayerInit` -> `DatabaseMigrationPg.apply`), under
+`pg_advisory_lock(727274)` via `client.reserve` (Memo #5). The advisory
+lock is the boot readiness barrier:
+
+1. First container to boot acquires the lock, probes
+   `information_schema.tables` for the `session` table, finds it absent,
+   and applies `0000_init.sql` inside one transaction.
+2. Subsequent containers acquire the lock (serialized), probe, find
+   `session` present, and skip to the replay-only path (apply pending
+   numbered migrations if any exist).
+
+The runtime image ships the blessed `.opencode/db-migrations/` directory at
+`/.opencode/db-migrations/` via a runtime COPY (`COPY --from=build /app/.opencode/db-migrations/ /.opencode/db-migrations/`).
+The runner resolves `migrationsDir()` via `import.meta.url` (migration.pg.ts:44-47)
+to that real filesystem path at runtime.
+
+### Verifying the running stack
+
+```bash
+# Check migration journal
+docker compose exec db psql -U opencode -d opencode \
+  -c 'SELECT * FROM "migration" ORDER BY id;'
+
+# Check application_name per container in pg_stat_activity
+docker compose exec db psql -U opencode -d opencode \
+  -c "SELECT application_name, state, count(*) FROM pg_stat_activity
+      WHERE application_name LIKE 'opencode-%'
+      GROUP BY application_name, state ORDER BY application_name;"
+
+# Check listener connections (one per container, outside pool)
+docker compose exec db psql -U opencode -d opencode \
+  -c "SELECT application_name, state, query FROM pg_stat_activity
+      WHERE state = 'idle' AND application_name LIKE 'opencode-%'
+      AND query LIKE '%LISTEN%' ORDER BY application_name;"
+
+# Per-container connection count (should be <= pool_max + 1 listener)
+docker compose exec db psql -U opencode -d opencode \
+  -c "SELECT application_name, count(*) AS connections
+      FROM pg_stat_activity WHERE application_name LIKE 'opencode-%'
+      GROUP BY application_name ORDER BY application_name;"
+
+# Projection-lag gauge
+docker compose exec db psql -U opencode -d opencode \
+  -c "SELECT s.id AS session_id, es.seq AS committed_seq,
+      COALESCE(spc.applied_seq, -1) AS applied_seq,
+      es.seq - COALESCE(spc.applied_seq, -1) AS projection_lag
+      FROM session s
+      JOIN event_sequence es ON es.aggregate_id = s.id
+      LEFT JOIN session_projection_checkpoint spc ON spc.session_id = s.id
+      ORDER BY projection_lag DESC;"
+```
+
+### Tear down
+
+```bash
+docker compose down -v  # removes volumes and networks
+```

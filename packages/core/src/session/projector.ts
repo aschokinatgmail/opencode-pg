@@ -3,20 +3,22 @@ export * as SessionProjector from "./projector"
 import { and, desc, eq, gt, or, sql } from "drizzle-orm"
 import { DateTime, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
+import * as DatabaseSchema from "../database/schema.pg"
+import { Flush } from "../database/flush"
 import { EventV2 } from "../event"
 import { makeGlobalNode } from "../effect/app-node"
+import { node as SchemaNode } from "../schema-node"
 import { SessionEvent } from "./event"
 import { SessionV1 } from "../v1/session"
-import { WorkspaceTable } from "../control-plane/workspace.sql"
 import { SessionMessage } from "./message"
 import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { SessionContextEpoch } from "./context-epoch"
-import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
 import type { DeepMutable } from "../schema"
 
 type DatabaseService = Database.Interface["db"]
+type SchemaTables = DatabaseSchema.SchemaTables
 
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
@@ -41,7 +43,7 @@ function usage(part: (typeof SessionV1.Event.PartUpdated.Type)["data"]["part"] |
   return { cost: value.cost as Usage["cost"], tokens: value.tokens as Usage["tokens"] }
 }
 
-function sessionRow(info: SessionV1.SessionInfo): typeof SessionTable.$inferInsert {
+function sessionRow(info: SessionV1.SessionInfo): SchemaTables["SessionTable"]["$inferInsert"] {
   return {
     id: info.id,
     project_id: info.projectID,
@@ -77,22 +79,72 @@ function sessionRow(info: SessionV1.SessionInfo): typeof SessionTable.$inferInse
 
 function messageData(
   info: (typeof SessionV1.Event.MessageUpdated.Type)["data"]["info"],
-): typeof MessageTable.$inferInsert.data {
+): SchemaTables["MessageTable"]["$inferInsert"]["data"] {
   const { id: _, sessionID: __, ...rest } = info
   return rest as DeepMutable<typeof rest>
 }
 
-function partData(part: (typeof SessionV1.Event.PartUpdated.Type)["data"]["part"]): typeof PartTable.$inferInsert.data {
+function partData(part: (typeof SessionV1.Event.PartUpdated.Type)["data"]["part"]): SchemaTables["PartTable"]["$inferInsert"]["data"] {
   const { id: _, messageID: __, sessionID: ___, ...rest } = part
   return rest as DeepMutable<typeof rest>
 }
 
+function negateUsage(value: Usage): Usage {
+  return {
+    cost: -value.cost,
+    tokens: {
+      input: -value.tokens.input,
+      output: -value.tokens.output,
+      reasoning: -value.tokens.reasoning,
+      cache: { read: -value.tokens.cache.read, write: -value.tokens.cache.write },
+    },
+  }
+}
+
+function addUsage(a: Usage, b: Usage): Usage {
+  return {
+    cost: a.cost + b.cost,
+    tokens: {
+      input: a.tokens.input + b.tokens.input,
+      output: a.tokens.output + b.tokens.output,
+      reasoning: a.tokens.reasoning + b.tokens.reasoning,
+      cache: { read: a.tokens.cache.read + b.tokens.cache.read, write: a.tokens.cache.write + b.tokens.cache.write },
+    },
+  }
+}
+
+function isZeroUsage(value: Usage): boolean {
+  return (
+    value.cost === 0 &&
+    value.tokens.input === 0 &&
+    value.tokens.output === 0 &&
+    value.tokens.reasoning === 0 &&
+    value.tokens.cache.read === 0 &&
+    value.tokens.cache.write === 0
+  )
+}
+
+// B5.1: one consolidated delta per event; undefined means skip the session
+// UPDATE entirely (no usage carried, or previous equals next).
+function usageDelta(previous: Usage | undefined, next: Usage | undefined): Usage | undefined {
+  if (previous === undefined) return next
+  if (next === undefined) return negateUsage(previous)
+  const delta = addUsage(next, negateUsage(previous))
+  return isZeroUsage(delta) ? undefined : delta
+}
+
+// B5.2 fence: usage-bearing projections are sync-tier ONLY. Any PR moving
+// StepFinish-part usage projection onto the async flush pool is REJECT on
+// sight (Memo #6 B5.2) — outside the aggregate-serialized event tx a stale
+// previous read could double-decrement usage (FM-15).
 function applyUsage(
   db: DatabaseService,
+  schema: SchemaTables,
   sessionID: (typeof SessionV1.Event.MessageUpdated.Type)["data"]["sessionID"],
   value: Usage,
   sign = 1,
 ) {
+  const SessionTable = schema.SessionTable
   return db
     .update(SessionTable)
     .set({
@@ -109,9 +161,10 @@ function applyUsage(
     .pipe(Effect.orDie)
 }
 
-function run(db: DatabaseService, event: SessionEvent.Event) {
+function run(db: DatabaseService, schema: SchemaTables, event: SessionEvent.Event) {
+  const SessionMessageTable = schema.SessionMessageTable
   return Effect.gen(function* () {
-    const decodeRow = (row: typeof SessionMessageTable.$inferSelect) =>
+    const decodeRow = (row: SchemaTables["SessionMessageTable"]["$inferSelect"]) =>
       decodeMessage({ ...row.data, id: row.id, type: row.type })
     const updateMessage = (message: SessionMessage.Message) => {
       if (event.durable === undefined) return Effect.die("Durable Session event is missing aggregate sequence")
@@ -129,7 +182,7 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
         .run()
         .pipe(Effect.orDie)
     }
-    const appendMessage = (message: SessionMessage.Message) => insertMessage(db, event, message)
+    const appendMessage = (message: SessionMessage.Message) => insertMessage(db, schema, event, message)
     const adapter: SessionMessageUpdater.Adapter = {
       getCurrentAssistant() {
         return Effect.gen(function* () {
@@ -190,8 +243,9 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
   })
 }
 
-function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: SessionMessage.Message) {
+function insertMessage(db: DatabaseService, schema: SchemaTables, event: SessionEvent.Event, message: SessionMessage.Message) {
   if (event.durable === undefined) return Effect.die("Durable Session event is missing aggregate sequence")
+  const SessionMessageTable = schema.SessionMessageTable
   const encoded = encodeMessage(message)
   const { id, type, ...data } = encoded
   return db
@@ -212,6 +266,13 @@ const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const events = yield* EventV2.Service
     const { db } = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    const SessionTable = schema.SessionTable
+    const MessageTable = schema.MessageTable
+    const PartTable = schema.PartTable
+    const SessionMessageTable = schema.SessionMessageTable
+    const SessionInputTable = schema.SessionInputTable
+    const WorkspaceTable = schema.WorkspaceTable
     yield* events.project(SessionV1.Event.Created, (event) =>
       Effect.gen(function* () {
         const stored = yield* db
@@ -253,7 +314,7 @@ const layer = Layer.effectDiscard(
           .where(eq(SessionTable.id, event.data.sessionID))
           .run()
           .pipe(Effect.orDie)
-        yield* SessionContextEpoch.reset(db, event.data.sessionID)
+        yield* SessionContextEpoch.reset(db, schema, event.data.sessionID)
       }),
     )
     yield* events.project(SessionV1.Event.Deleted, (event) =>
@@ -281,10 +342,13 @@ const layer = Layer.effectDiscard(
           .where(and(eq(PartTable.message_id, event.data.messageID), eq(PartTable.session_id, event.data.sessionID)))
           .all()
           .pipe(Effect.orDie)
-        for (const row of rows) {
-          const previous = usage(row.data)
-          if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
-        }
+        // B5.1: sum the removed parts' usage in JS and apply ONE statement
+        // with sign −1 instead of one applyUsage per part.
+        const removed = rows.reduce<Usage | undefined>((total, row) => {
+          const value = usage(row.data)
+          return value === undefined ? total : total === undefined ? value : addUsage(total, value)
+        }, undefined)
+        if (removed) yield* applyUsage(db, schema, event.data.sessionID, removed, -1)
         yield* db
           .delete(MessageTable)
           .where(and(eq(MessageTable.id, event.data.messageID), eq(MessageTable.session_id, event.data.sessionID)))
@@ -301,7 +365,7 @@ const layer = Layer.effectDiscard(
           .get()
           .pipe(Effect.orDie)
         const previous = row && usage(row.data)
-        if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
+        if (previous) yield* applyUsage(db, schema, event.data.sessionID, previous, -1)
         yield* db
           .delete(PartTable)
           .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
@@ -324,8 +388,17 @@ const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
         const previous = row && usage(row.data)
         const next = usage(event.data.part)
-        if (previous) yield* applyUsage(db, row.session_id, previous, -1)
-        if (next) yield* applyUsage(db, sessionID, next)
+        // B5.1: consolidate usage deltas per event — ONE applyUsage with
+        // next − previous computed in JS (skip when equal). Keep the two-
+        // statement split ONLY on the cross-session anomaly where
+        // row.session_id ≠ event sessionID (part moved across sessions).
+        if (previous && row.session_id !== sessionID) {
+          yield* applyUsage(db, schema, row.session_id, previous, -1)
+          if (next) yield* applyUsage(db, schema, sessionID, next)
+          return
+        }
+        const delta = usageDelta(previous, next)
+        if (delta) yield* applyUsage(db, schema, sessionID, delta)
       }),
     )
     yield* events.project(SessionEvent.AgentSwitched, (event) =>
@@ -334,7 +407,7 @@ const layer = Layer.effectDiscard(
         .set({ agent: event.data.agent, time_updated: DateTime.toEpochMillis(event.data.timestamp) })
         .where(eq(SessionTable.id, event.data.sessionID))
         .run()
-        .pipe(Effect.orDie, Effect.andThen(run(db, event))),
+        .pipe(Effect.orDie, Effect.andThen(run(db, schema, event))),
     )
     yield* events.project(SessionEvent.ModelSwitched, (event) =>
       Effect.gen(function* () {
@@ -344,13 +417,13 @@ const layer = Layer.effectDiscard(
           .where(eq(SessionTable.id, event.data.sessionID))
           .run()
           .pipe(Effect.orDie)
-        yield* run(db, event)
+        yield* run(db, schema, event)
       }),
     )
     yield* events.project(SessionEvent.Prompted, (event) =>
       Effect.gen(function* () {
         if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
-        yield* SessionInput.projectPrompted(db, {
+        yield* SessionInput.projectPrompted(db, schema, {
           id: event.data.messageID,
           sessionID: event.data.sessionID,
           prompt: event.data.prompt,
@@ -358,13 +431,13 @@ const layer = Layer.effectDiscard(
           timeCreated: event.data.timestamp,
           promotedSeq: event.durable.seq,
         })
-        yield* run(db, event)
+        yield* run(db, schema, event)
       }),
     )
     yield* events.project(SessionEvent.PromptAdmitted, (event) =>
       Effect.gen(function* () {
         if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
-        yield* SessionInput.projectAdmitted(db, {
+        yield* SessionInput.projectAdmitted(db, schema, {
           admittedSeq: event.durable.seq,
           id: event.data.messageID,
           sessionID: event.data.sessionID,
@@ -374,25 +447,31 @@ const layer = Layer.effectDiscard(
         })
       }),
     )
-    yield* events.project(SessionEvent.ContextUpdated, (event) => run(db, event))
-    yield* events.project(SessionEvent.Synthetic, (event) => run(db, event))
-    yield* events.project(SessionEvent.Shell.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Shell.Ended, (event) => run(db, event))
-    yield* events.project(SessionEvent.Step.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Step.Ended, (event) => run(db, event))
-    yield* events.project(SessionEvent.Step.Failed, (event) => run(db, event))
-    yield* events.project(SessionEvent.Text.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Text.Ended, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Input.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Input.Ended, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Called, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Progress, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Success, (event) => run(db, event))
-    yield* events.project(SessionEvent.Tool.Failed, (event) => run(db, event))
-    yield* events.project(SessionEvent.Reasoning.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
-    // yield* events.project(SessionEvent.Retried, (event) => run(db, event))
-    yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, event))
+    yield* events.project(SessionEvent.ContextUpdated, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Synthetic, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Shell.Started, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Shell.Ended, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Step.Started, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Step.Ended, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Step.Failed, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Text.Started, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Text.Ended, (event) => run(db, schema, event))
+    // T3 (Memo #2): Tool.Progress is the async-tier event (Memo #16 ruling:
+    // Text.Delta is live-only by design — never durable, never projected,
+    // never flushed). The Tool.Progress projector is deferred to the flush
+    // pool under PG. The registration happens here (so runProjectors can
+    // find it), but commitDurableEvent skips it in the sync tx under PG.
+    yield* events.project(SessionEvent.Tool.Progress, (event) => run(db, schema, event))
+    Flush.registerAsyncTierType(SessionEvent.Tool.Progress.type)
+    yield* events.project(SessionEvent.Tool.Input.Started, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Tool.Input.Ended, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Tool.Called, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Tool.Success, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Tool.Failed, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Reasoning.Started, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, schema, event))
+    // yield* events.project(SessionEvent.Retried, (event) => run(db, schema, event))
+    yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, schema, event))
     yield* events.project(SessionEvent.RevertEvent.Staged, (event) =>
       db
         .update(SessionTable)
@@ -449,10 +528,14 @@ const layer = Layer.effectDiscard(
           .where(eq(SessionTable.id, event.data.sessionID))
           .run()
           .pipe(Effect.orDie)
-        yield* SessionContextEpoch.reset(db, event.data.sessionID)
+        yield* SessionContextEpoch.reset(db, schema, event.data.sessionID)
       }),
     )
   }),
 )
 
-export const node = makeGlobalNode({ name: "session-projector", layer, deps: [EventV2.node, Database.node] })
+export const node = makeGlobalNode({
+  name: "session-projector",
+  layer: layer as unknown as Layer.Layer<void, never, never>,
+  deps: [EventV2.node, Database.node, SchemaNode],
+})
