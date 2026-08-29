@@ -159,3 +159,47 @@ docker compose exec db psql -U opencode -d opencode \
 ```bash
 docker compose down -v  # removes volumes and networks
 ```
+
+## Security
+
+This stack is a **staging** deployment: a single-host compose bridge
+network with SCRAM-authenticated PostgreSQL. It is not a production
+exposure surface. The following rules are load-bearing — do not relax
+them without a memo-level decision.
+
+### Required environment variables
+
+`docker compose up` fails fast without these — the compose file uses
+`${VAR:?}` interpolation, so a missing variable aborts before any
+container starts (no default credentials are ever baked in):
+
+```bash
+# .env (next to docker-compose.yml)
+POSTGRES_PASSWORD=change-me
+OPENCODE_SERVER_PASSWORD=change-me
+```
+
+`POSTGRES_USER` stays `opencode` (the username is not a secret); the
+passwords are. The `DATABASE_URL` values inside the compose file embed
+`${POSTGRES_PASSWORD}` so the eight opencode containers authenticate
+with the same secret the `db` service was initialized with.
+
+### Loopback-only published ports
+
+All published ports (`5432`, `4011`-`4018`) are bound to
+`127.0.0.1` **by design** — the `127.0.0.1:` prefix must not be
+removed. Loopback binding keeps the stack usable locally while keeping
+it off the LAN. Cross-host exposure requires, at minimum, TLS
+(`sslmode=require` in the client connection string) **and** non-default
+credentials; neither is configured here.
+
+### Migration-dir trust model
+
+The files under `/.opencode/db-migrations/*.sql` are **executable trust
+artifacts**: the migration runner executes them verbatim at boot under
+`pg_advisory_lock(727274)`. Only image builds may supply them (the
+runtime `COPY` in `docker/Dockerfile`). **NEVER bind-mount
+`.opencode/db-migrations` into a container** — a bind mount would let
+anyone with host write access inject arbitrary SQL that runs as the
+`opencode` superuser on every boot. The committed directory is
+integrity-protected by a recorded sha256 (grep-guard B6.3 freeze).
