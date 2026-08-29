@@ -220,4 +220,39 @@ describe("grep-guard — static bans (Step 7)", () => {
     }
     expect(violations).toEqual([])
   })
+
+  test("FM-21 (Condition C): app layer has no static RUNTIME imports of @opencode-ai/core/**/sql or **/sql.pg", async () => {
+    // The app layer (packages/opencode/src) must source table objects ONLY
+    // via the Database.Schema service (the DatabaseSchema seam in
+    // storage/db-schema.ts). Direct imports of `*/sql` table objects are
+    // SQLite-bound at module scope and emit SQLite-dialect SQL even when
+    // the Database service runs on PostgreSQL (Decision Memo #19, Ruling
+    // 4). `**/sql.pg` modules are core-internal PG table objects — equally
+    // banned: the app layer must not reach into dialect-specific table
+    // objects at all. Type-only imports are erased at runtime and are
+    // therefore allowed (same convention as the Memo #17 Cond 3 guard).
+    const appSrc = resolve(__dirname, "../../../packages/opencode/src")
+    const appFiles = await Array.fromAsync(
+      $`find ${appSrc} -name '*.ts'`.lines(),
+    )
+    const files = appFiles.filter((f) => f.trim().length > 0)
+
+    const violations: string[] = []
+    for (const file of files) {
+      const content = await Bun.file(file).text()
+      for (const line of content.split("\n")) {
+        // Match static runtime imports of @opencode-ai/core/**
+        // (NOT `import type` — type imports are erased at runtime).
+        const runtimeImportMatch = line.match(/^import\s+(?!type\s).*?from\s+["']@opencode-ai\/core\/(.+?)["']/)
+        if (!runtimeImportMatch) continue
+        const modulePath = runtimeImportMatch[1]
+        // Banned: any module path ending in /sql or sql.pg
+        // (e.g. database/sql, session/sql.pg, event/sql.pg).
+        if (/(^|\/)sql(\.pg)?$/.test(modulePath)) {
+          violations.push(`${file}:${line.trim()}`)
+        }
+      }
+    }
+    expect(violations).toEqual([])
+  })
 })

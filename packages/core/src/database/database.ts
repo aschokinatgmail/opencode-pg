@@ -38,7 +38,8 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
 
 // DATABASE_URL set → PG backend (decision #8); unset → SQLite untouched.
-export const databaseUrl = process.env.DATABASE_URL
+// normalize empty-string env to undefined so isPg (!== undefined) and layer dispatch (truthiness) can never disagree
+export const databaseUrl = process.env.DATABASE_URL || undefined
 
 // Dialect fork primitive (Memo #11 Cond 1 precedent — single-source the
 // dialect decision via `databaseUrl`, never re-read env). Consumers branch
