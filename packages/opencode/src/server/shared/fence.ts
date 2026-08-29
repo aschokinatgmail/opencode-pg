@@ -1,6 +1,6 @@
 import { Database } from "@opencode-ai/core/database/database"
 import { inArray } from "drizzle-orm"
-import { EventSequenceTable } from "@opencode-ai/core/event/sql"
+import { DatabaseSchema } from "@/storage/db-schema"
 import { Workspace } from "@/control-plane/workspace"
 import type { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { Effect } from "effect"
@@ -8,8 +8,9 @@ import { Effect } from "effect"
 export const HEADER = "x-opencode-sync"
 export type State = Record<string, number>
 
-export function load(db: Database.Interface["db"], ids?: string[]) {
+export function load(db: Database.Interface["db"], schema: DatabaseSchema.SchemaTables, ids?: string[]) {
   return Effect.gen(function* () {
+    const EventSequenceTable = schema.EventSequenceTable
     const rows = yield* (
       ids?.length
         ? db.select().from(EventSequenceTable).where(inArray(EventSequenceTable.aggregate_id, ids)).all()

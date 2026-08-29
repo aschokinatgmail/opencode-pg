@@ -26,8 +26,7 @@ import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
 import type { SQL } from "drizzle-orm"
-import { PartTable, SessionTable } from "@opencode-ai/core/session/sql"
-import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { DatabaseSchema, SchemaNode } from "@/storage/db-schema"
 import { MessageV2 } from "./message-v2"
 import type { InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
@@ -54,7 +53,7 @@ export function isDefaultTitle(title: string) {
   ).test(title)
 }
 
-type SessionRow = typeof SessionTable.$inferSelect
+type SessionRow = DatabaseSchema.SchemaTables["SessionTable"]["$inferSelect"]
 
 export function fromRow(row: SessionRow): Info {
   const summary =
@@ -488,12 +487,16 @@ export type Patch = Omit<Partial<Info>, "time" | "share" | "summary" | "revert" 
 const layer: Layer.Layer<
   Service,
   never,
-  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service
+  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service | DatabaseSchema.Schema
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
     const { db } = yield* Database.Service
     const database = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    const SessionTable = schema.SessionTable
+    const PartTable = schema.PartTable
+    const ProjectTable = schema.ProjectTable
     const background = yield* BackgroundJob.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
@@ -547,7 +550,7 @@ const layer: Layer.Layer<
 
     const list = Effect.fn("Session.list")(function* (input?: ListInput) {
       const ctx = yield* InstanceState.context
-      return yield* listByProject(db, {
+      return yield* listByProject(db, schema, {
         projectID: ctx.project.id,
         experimentalWorkspaces: flags.experimentalWorkspaces,
         ...input,
@@ -831,6 +834,7 @@ const layer: Layer.Layer<
       if (input.limit) {
         return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).pipe(
           Effect.provideService(Database.Service, database),
+          Effect.provideService(DatabaseSchema.Schema, schema),
         )).items
       }
 
@@ -840,6 +844,7 @@ const layer: Layer.Layer<
       while (true) {
         const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before }).pipe(
           Effect.provideService(Database.Service, database),
+          Effect.provideService(DatabaseSchema.Schema, schema),
         )
         if (page.items.length === 0) break
         for (let i = page.items.length - 1; i >= 0; i--) {
@@ -893,6 +898,7 @@ const layer: Layer.Layer<
       while (true) {
         const page = yield* MessageV2.page({ sessionID, limit: size, before }).pipe(
           Effect.provideService(Database.Service, database),
+          Effect.provideService(DatabaseSchema.Schema, schema),
         )
         if (page.items.length === 0) break
         for (let i = page.items.length - 1; i >= 0; i--) {
@@ -956,11 +962,13 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
 
 function listByProject(
   db: Database.Interface["db"],
+  schema: DatabaseSchema.SchemaTables,
   input: ListInput & {
     projectID: ProjectV2.ID
     experimentalWorkspaces: boolean
   },
 ) {
+  const SessionTable = schema.SessionTable
   const conditions = [eq(SessionTable.project_id, input.projectID)]
 
   if (input.workspaceID) {
@@ -1012,7 +1020,7 @@ function listByProject(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node],
+  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node, SchemaNode],
 })
 
 export * as Session from "./session"

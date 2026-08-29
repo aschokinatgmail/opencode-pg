@@ -22,6 +22,7 @@ import { SessionSummary } from "../../src/session/summary"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
+import { SchemaNode } from "@/storage/db-schema"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -83,6 +84,7 @@ const root = LayerNode.group([
   SessionProjector.node,
   SessionSummary.node,
   Database.node,
+  SchemaNode,
   CrossSpawnSpawner.node,
   LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] }),
 ])

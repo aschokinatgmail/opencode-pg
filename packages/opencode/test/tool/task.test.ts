@@ -1,6 +1,7 @@
 import { afterEach, describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
+import { SchemaNode } from "@/storage/db-schema"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
@@ -80,6 +81,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       Truncate.node,
       ToolRegistry.node,
       Database.node,
+      SchemaNode,
       RuntimeFlags.node,
       Ripgrep.node,
     ]),

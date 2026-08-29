@@ -1,10 +1,8 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { and, eq, sql } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
-import { ProjectDirectoryTable, ProjectTable } from "@opencode-ai/core/project/sql"
+import { DatabaseSchema, SchemaNode } from "@/storage/db-schema"
 import { ProjectDirectories } from "@opencode-ai/core/project/directories"
-import { SessionTable } from "@opencode-ai/core/session/sql"
-import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { GlobalBus } from "@/bus/global"
 import { which } from "@opencode-ai/core/util/which"
@@ -30,7 +28,7 @@ export const Event = {
   Updated: Project.Event.Updated,
 }
 
-type Row = typeof ProjectTable.$inferSelect
+type Row = DatabaseSchema.SchemaTables["ProjectTable"]["$inferSelect"]
 
 export function fromRow(row: Row): Info {
   const icon =
@@ -113,6 +111,11 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const { db } = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    const ProjectTable = schema.ProjectTable
+    const ProjectDirectoryTable = schema.ProjectDirectoryTable
+    const SessionTable = schema.SessionTable
+    const WorkspaceTable = schema.WorkspaceTable
 
     const git = Effect.fnUntraced(
       function* (args: string[], opts?: { cwd?: string }) {
@@ -477,6 +480,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     RuntimeFlags.node,
     Database.node,
+    SchemaNode,
   ],
 })
 

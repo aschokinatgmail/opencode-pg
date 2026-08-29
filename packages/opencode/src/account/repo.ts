@@ -4,11 +4,11 @@ import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Effect, Layer, Option, Schema, Context } from "effect"
 
 import { Database } from "@opencode-ai/core/database/database"
-import { AccountStateTable, AccountTable } from "@opencode-ai/core/account/sql"
+import { DatabaseSchema, SchemaNode } from "@/storage/db-schema"
 import { AccessToken, AccountID, AccountRepoError, Info, OrgID, RefreshToken } from "./schema"
 import { normalizeServerUrl } from "./url"
 
-export type AccountRow = (typeof AccountTable)["$inferSelect"]
+export type AccountRow = DatabaseSchema.SchemaTables["AccountTable"]["$inferSelect"]
 
 const ACCOUNT_STATE_ID = 1
 
@@ -43,6 +43,9 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const { db } = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    const AccountTable = schema.AccountTable
+    const AccountStateTable = schema.AccountStateTable
     const decode = Schema.decodeUnknownSync(Info)
 
     const query = <A, E>(effect: Effect.Effect<A, E>) =>
@@ -166,6 +169,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Database.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Database.node, SchemaNode] })
 
 export * as AccountRepo from "./repo"

@@ -10,6 +10,7 @@ import { Config } from "@/config/config"
 import { Git } from "@/git"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Storage } from "@/storage/storage"
+import { SchemaNode } from "@/storage/db-schema"
 import { Snapshot } from "@/snapshot"
 import { Plugin } from "@/plugin"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
@@ -60,6 +61,7 @@ export const AppLayer = AppNodeBuilderV1.build(
     Npm.node,
     FSUtil.node,
     Database.node,
+    SchemaNode,
     Auth.node,
     Account.node,
     Config.node,

@@ -27,7 +27,7 @@ import { eq } from "drizzle-orm"
 import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
-import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { DatabaseSchema, SchemaNode } from "@/storage/db-schema"
 import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
@@ -77,14 +77,14 @@ export const cursor = {
   },
 }
 
-const info = (row: typeof MessageTable.$inferSelect) =>
+const info = (row: DatabaseSchema.SchemaTables["MessageTable"]["$inferSelect"]) =>
   ({
     ...row.data,
     id: row.id,
     sessionID: row.session_id,
   }) as Info
 
-const part = (row: typeof PartTable.$inferSelect) =>
+const part = (row: DatabaseSchema.SchemaTables["PartTable"]["$inferSelect"]) =>
   ({
     ...row.data,
     id: row.id,
@@ -92,10 +92,20 @@ const part = (row: typeof PartTable.$inferSelect) =>
     messageID: row.message_id,
   }) as Part
 
-const older = (row: Cursor) =>
-  or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
+const older = (schema: DatabaseSchema.SchemaTables, row: Cursor) => {
+  const MessageTable = schema.MessageTable
+  return or(
+    lt(MessageTable.time_created, row.time),
+    and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)),
+  )
+}
 
-function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$inferSelect)[]) {
+function hydrate(
+  db: Database.Interface["db"],
+  schema: DatabaseSchema.SchemaTables,
+  rows: DatabaseSchema.SchemaTables["MessageTable"]["$inferSelect"][],
+) {
+  const PartTable = schema.PartTable
   const ids = rows.map((row) => row.id)
   const partByMessage = new Map<string, Part[]>()
   return Effect.gen(function* () {
@@ -428,9 +438,12 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   before?: string
 }) {
   const { db } = yield* Database.Service
+  const schema = yield* DatabaseSchema.Schema
+  const MessageTable = schema.MessageTable
+  const SessionTable = schema.SessionTable
   const before = input.before ? cursor.decode(input.before) : undefined
   const where = before
-    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
+    ? and(eq(MessageTable.session_id, input.sessionID), older(schema, before))
     : eq(MessageTable.session_id, input.sessionID)
   const rows = yield* db
     .select()
@@ -456,7 +469,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 
   const more = rows.length > input.limit
   const slice = more ? rows.slice(0, input.limit) : rows
-  const items = yield* hydrate(db, slice)
+  const items = yield* hydrate(db, schema, slice)
   items.reverse()
   const tail = slice.at(-1)
   return {
@@ -492,6 +505,7 @@ export function stream(sessionID: SessionID) {
 export function parts(messageID: MessageID) {
   return Effect.gen(function* () {
     const { db } = yield* Database.Service
+    const PartTable = (yield* DatabaseSchema.Schema).PartTable
     const rows = yield* db
       .select()
       .from(PartTable)
@@ -505,6 +519,7 @@ export function parts(messageID: MessageID) {
 
 export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: SessionID; messageID: MessageID }) {
   const { db } = yield* Database.Service
+  const MessageTable = (yield* DatabaseSchema.Schema).MessageTable
   const row = yield* db
     .select()
     .from(MessageTable)
@@ -734,4 +749,4 @@ export function fromError(
 }
 
 export * as MessageV2 from "./message-v2"
-export const node = LayerNode.group([Database.node])
+export const node = LayerNode.group([Database.node, SchemaNode])

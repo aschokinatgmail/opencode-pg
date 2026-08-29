@@ -1,5 +1,6 @@
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
+import { DatabaseSchema, SchemaNode } from "@/storage/db-schema"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
@@ -171,6 +172,7 @@ const root = LayerNode.group([
   SessionProjector.node,
   Provider.node,
   Database.node,
+  SchemaNode,
   EventV2Bridge.node,
   SessionStatus.node,
   CrossSpawnSpawner.node,
@@ -290,6 +292,7 @@ it.live("session.processor effect tests preserve text start time", () =>
     ({ dir, llm }) =>
       Effect.gen(function* () {
         const database = yield* Database.Service
+        const schema = yield* DatabaseSchema.Schema
         const gate = defer<void>()
         const { processors, session, provider } = yield* boot()
 
@@ -351,6 +354,7 @@ it.live("session.processor effect tests preserve text start time", () =>
           MessageV2.parts(msg.id).pipe(
             Effect.map((parts) => parts.find((part): part is SessionV1.TextPart => part.type === "text")),
             Effect.provideService(Database.Service, database),
+            Effect.provideService(DatabaseSchema.Schema, schema),
           ),
           "timed out waiting for text part",
         )
@@ -818,6 +822,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
     ({ dir, llm }) =>
       Effect.gen(function* () {
         const database = yield* Database.Service
+        const schema = yield* DatabaseSchema.Schema
         const { processors, session, provider } = yield* boot()
 
         yield* llm.toolHang("bash", { cmd: "pwd" })
@@ -856,6 +861,7 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
           MessageV2.parts(msg.id).pipe(
             Effect.map((parts) => parts.find((part): part is SessionV1.ToolPart => part.type === "tool")),
             Effect.provideService(Database.Service, database),
+            Effect.provideService(DatabaseSchema.Schema, schema),
           ),
           "timed out waiting for tool part",
         )

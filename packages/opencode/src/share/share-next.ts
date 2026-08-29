@@ -15,7 +15,7 @@ import type { SessionID } from "@/session/schema"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
 import { Config } from "@/config/config"
-import { SessionShareTable } from "@opencode-ai/core/share/sql"
+import { DatabaseSchema, SchemaNode } from "@/storage/db-schema"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -116,6 +116,7 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const cfg = yield* Config.Service
     const { db } = yield* Database.Service
+    const SessionShareTable = (yield* DatabaseSchema.Schema).SessionShareTable
     const http = yield* HttpClient.HttpClient
     const httpOk = HttpClient.filterStatusOk(http)
     const provider = yield* Provider.Service
@@ -365,7 +366,7 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Account.node, EventV2Bridge.node, Config.node, Database.node, httpClient, Provider.node, Session.node],
+  deps: [Account.node, EventV2Bridge.node, Config.node, Database.node, SchemaNode, httpClient, Provider.node, Session.node],
 })
 
 export * as ShareNext from "./share-next"

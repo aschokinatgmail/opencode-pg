@@ -4,7 +4,7 @@ import { Session } from "@/session/session"
 import { MessageV2 } from "../../session/message-v2"
 import { CliError, effectCmd } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
-import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
+import { DatabaseSchema } from "@/storage/db-schema"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
@@ -111,6 +111,10 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
   const share = yield* ShareNext.Service
   const fs = yield* FSUtil.Service
   const { db } = yield* Database.Service
+  const schema = yield* DatabaseSchema.Schema
+  const SessionTable = schema.SessionTable
+  const MessageTable = schema.MessageTable
+  const PartTable = schema.PartTable
 
   let exportData: ExportData | undefined
 

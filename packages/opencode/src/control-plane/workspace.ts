@@ -12,18 +12,16 @@ import { GlobalBus } from "@/bus/global"
 import { Auth } from "@/auth"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
+import { DatabaseSchema, SchemaNode } from "@/storage/db-schema"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Slug } from "@opencode-ai/core/util/slug"
-import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
 import { getAdapter, registeredAdapters } from "./adapters"
 import { type Target, type WorkspaceInfo, WorkspaceInfo as WorkspaceInfoSchema } from "./types"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
 import { Session } from "@/session/session"
 import { SessionPrompt } from "@/session/prompt"
-import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionID } from "@/session/schema"
 import { NotFoundError } from "@/storage/storage"
 import { errorData } from "@/util/error"
@@ -46,7 +44,7 @@ export type ConnectionStatus = WorkspaceEvent.ConnectionStatus
 
 export const Event = WorkspaceEvent
 
-function fromRow(row: typeof WorkspaceTable.$inferSelect): Info {
+function fromRow(row: DatabaseSchema.SchemaTables["WorkspaceTable"]["$inferSelect"]): Info {
   return {
     id: row.id,
     type: row.type,
@@ -162,6 +160,11 @@ const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     const fs = yield* FSUtil.Service
     const { db } = yield* Database.Service
+    const schema = yield* DatabaseSchema.Schema
+    const WorkspaceTable = schema.WorkspaceTable
+    const SessionTable = schema.SessionTable
+    const EventTable = schema.EventTable
+    const EventSequenceTable = schema.EventSequenceTable
     const connections = new Map<WorkspaceV2.ID, ConnectionStatus>()
     const syncFibers = yield* FiberMap.make<WorkspaceV2.ID, void, SyncLoopError>()
 
@@ -829,10 +832,10 @@ const layer = Layer.effect(
       signal?: AbortSignal,
       timeout = TIMEOUT,
     ) {
-      if (yield* synced(db, state)) return
+      if (yield* synced(db, schema, state)) return
 
       yield* Effect.catch(
-        waitUntilSynced({ db, workspaceID, state, signal, timeout }),
+        waitUntilSynced({ db, schema, workspaceID, state, signal, timeout }),
         (): Effect.Effect<never, WaitForSyncError> =>
           signal?.aborted
             ? Effect.fail(
@@ -897,6 +900,7 @@ type HistoryEvent = {
 
 function waitUntilSynced(input: {
   db: Database.Interface["db"]
+  schema: DatabaseSchema.SchemaTables
   workspaceID: WorkspaceV2.ID
   state: Record<string, number>
   signal?: AbortSignal
@@ -910,13 +914,18 @@ function waitUntilSynced(input: {
         return event.workspace === input.workspaceID || event.payload.type === "sync"
       },
     }).pipe(
-      Effect.andThen(synced(input.db, input.state)),
+      Effect.andThen(synced(input.db, input.schema, input.state)),
       Effect.flatMap((done): Effect.Effect<void, unknown> => (done ? Effect.void : waitUntilSynced(input))),
     ),
   )
 }
 
-function synced(db: Database.Interface["db"], state: Record<string, number>): Effect.Effect<boolean> {
+function synced(
+  db: Database.Interface["db"],
+  schema: DatabaseSchema.SchemaTables,
+  state: Record<string, number>,
+): Effect.Effect<boolean> {
+  const EventSequenceTable = schema.EventSequenceTable
   const ids = Object.keys(state)
   if (ids.length === 0) return Effect.succeed(true)
 
@@ -958,6 +967,7 @@ export const node = LayerNode.make({
     RuntimeFlags.node,
     FSUtil.node,
     Database.node,
+    SchemaNode,
   ],
 })
 

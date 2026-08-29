@@ -5,7 +5,7 @@ import { InstanceStore } from "@/project/instance-store"
 import { Project } from "@/project/project"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
-import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { DatabaseSchema, SchemaNode } from "@/storage/db-schema"
 import type { ProjectV2 } from "@opencode-ai/core/project"
 import { Slug } from "@opencode-ai/core/util/slug"
 import { errorMessage } from "../util/error"
@@ -139,6 +139,7 @@ const layer: Layer.Layer<
   | Project.Service
   | InstanceStore.Service
   | Database.Service
+  | DatabaseSchema.Schema
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -147,6 +148,7 @@ const layer: Layer.Layer<
     const pathSvc = yield* Path.Path
     const appProcess = yield* AppProcess.Service
     const { db } = yield* Database.Service
+    const ProjectTable = (yield* DatabaseSchema.Schema).ProjectTable
     const gitSvc = yield* Git.Service
     const project = yield* Project.Service
     const store = yield* InstanceStore.Service
@@ -617,7 +619,7 @@ const layer: Layer.Layer<
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, path, AppProcess.node, Git.node, Project.node, InstanceStore.node, Database.node],
+  deps: [FSUtil.node, path, AppProcess.node, Git.node, Project.node, InstanceStore.node, Database.node, SchemaNode],
 })
 
 export * as Worktree from "."

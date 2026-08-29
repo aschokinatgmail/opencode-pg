@@ -105,15 +105,58 @@ jobs:
 
           docker rm -f pg-test 2>/dev/null || true
 
+      - name: Run opencode PG suites (FM-21 app-layer adoption — Condition C)
+        working-directory: packages/opencode
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/opencode_test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/opencode_test
+        run: |
+          # FM-21 (Condition C) app-layer PG proof: run the affected opencode
+          # suites under PG. The app layer has been rewired to use the
+          # Database.Schema service pattern (17 sites across packages/opencode),
+          # mirroring the core consumer pattern. All direct SQLite table-object
+          # imports eliminated — table objects now come from the PG namespace
+          # when DATABASE_URL is set. Same zero-test/failing-test discipline.
+          TEST_FILES=(
+            "test/tool/task.test.ts"
+            "test/session/processor-effect.test.ts"
+          )
+
+          TOTAL_TESTS=0
+          for file in "${TEST_FILES[@]}"; do
+            set +e
+            # LOAD-BEARING: bun default 5000ms → 16/23 timeout-failures
+            # (council probe); never drop this flag.
+            OUTPUT=$(bun test "$file" --timeout=30000 2>&1)
+            TEST_EXIT=$?
+            set -e
+            echo "$OUTPUT"
+            COUNT=$(echo "$OUTPUT" | grep -o 'Ran [0-9]*' | grep -o '[0-9]*' | head -1)
+            COUNT=${COUNT:-0}
+            if [ "$COUNT" -eq 0 ]; then
+              echo "ERROR: $file ran 0 tests (zero-test=fail rule, FM-18/28)"
+              exit 1
+            fi
+            if [ "$TEST_EXIT" -ne 0 ]; then
+              echo "ERROR: $file exited non-zero ($TEST_EXIT) — failing tests"
+              exit 1
+            fi
+            TOTAL_TESTS=$((TOTAL_TESTS + COUNT))
+          done
+
+          echo "Total opencode PG tests ran: $TOTAL_TESTS"
+          if [ "$TOTAL_TESTS" -eq 0 ]; then
+            echo "ERROR: zero tests ran across all opencode PG suites (FM-18/28)"
+            exit 1
+          fi
+
       - name: Run SQLite-leg suites (TEST_DATABASE_URL and DATABASE_URL unset, zero-test=fail)
         working-directory: packages/core
-        env:
-          TEST_DATABASE_URL: ""
-          DATABASE_URL: ""
         run: |
           # SQLite leg — both dialects gated in ONE authoritative workflow
-          # (Memo #17 Cond 4). Clean env: TEST_DATABASE_URL and DATABASE_URL
-          # both unset so isPg stays false and the SQLite leg of
+          # (Memo #17 Cond 4). Clean env: no TEST_DATABASE_URL/DATABASE_URL
+          # keys here and none at job/workflow level — env keys absent ⇒
+          # process.env.X undefined ⇒ isPg false, so the SQLite leg of
           # dialect-matrix runs (the PG leg early-returns). The grep-guard
           # runs under the same env to verify the static-import ban.
           # Same zero-test/failing-test rules as the PG leg.

@@ -62,6 +62,10 @@ const { a, b } = obj
 - Never use star imports. Do not use `import * as Foo from "..."` or `import type * as Foo from "..."`.
 - If a namespace-style value is needed, import the module's own exported namespace by name, for example `import { Project } from "@opencode-ai/core/project"`, then reference `Project.ID`.
 - Prefer dynamic imports for heavy modules that are only needed in selected code paths, especially in startup-sensitive entrypoints. Destructure dynamic import bindings near the top of the narrowest scope that needs them so they read like normal imports. Avoid inline chains such as `await import("./module").then((mod) => mod.value())` or `(await import("./module")).value()`. Keep branch-specific imports inside the branch that needs them to preserve lazy loading.
+- SELF-EXPORT (defining a namespace): `export * as Foo from "./module"` is REQUIRED when a module is meant to be consumed as a namespace (e.g. `config/agent.ts` → `ConfigAgent`). This is the legal factory.
+- CONSUMPTION (using a namespace): import the self-exported name — `import { Database } from "@opencode-ai/core/database"`, then `Database.Service`. Do NOT consume a leaf module as `import * as Foo`.
+- EXCEPTION (grandfathered, debt-recorded): `import * as` for Effect-idiomatic service modules used inside other service modules (e.g. `import * as Client from "effect/unstable/sql/SqlClient"`, `import * as Effect`) is permitted in existing files ONLY. New files MUST use the self-export/named-namespace form. `import type * as` is banned in all cases without exception.
+- RATIONALE: the ban targets ambiguous provenance and cycle risk on CONSUMPTION; self-export is exempt because it is definition, not consumption.
 
 ### Variables
 
