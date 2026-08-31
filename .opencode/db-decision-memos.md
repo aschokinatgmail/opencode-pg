@@ -1411,6 +1411,7 @@ Legend — PG type | constraint. `ts` = SQLite source type. Deviations are **bol
 | FM-36 | asserted-but-never-executed artifact verification (Step 8 Wave 1, incident-proven): the image build was declared complete/"300s timeout" while it actually failed DETERMINISTICALLY at step 2/23 in ~30s — the image was never buildable at first landing (COPY of nonexistent manifests; invalid `2>/dev/null \|\| true` syntax); the bunfs-embedding claim was likewise asserted, not observed. Belief-reality divergence class (FM-30/FM-35 family) on the BUILD/DEPLOY surface — caught only when Wave 2 actually executed the build | an artifact claim (build success, boot, migration apply) counts as evidence ONLY with an executed exit-0 run in the reporting session; a declared "timeout" on a ~30s deterministic failure = misdiagnosis red flag; compiled-artifact behavior (path resolution, libc linkage) is verified by RUNNING the compiled artifact, never by source-tree reasoning — **NAMED Memo #18 (Wave 2/3 incident chain; guard standard applied to all future Step 9 evidence)** — **CLASS EXTENDED Memo #19 (stale-environment evidence)**: typechecks re-executed on the restored tree exited 0 only after a node_modules frozen-install repair (the stale install resolved 9 DISTINCT drizzle-orm build hashes; the source tree was always correct) — evidence is valid only from an install provably resolving the current tree; verify the ENVIRONMENT, not just the command | #18/#19 |
 | FM-37 | uncommitted-artifact loss, SECOND INSTANCE (2026-08-20, documented Memo #19 §19.1): the ENTIRE Step 1-9 corpus (108 files — these memos, the evidence ledger, migrations/bootstrap, the Dockerfile, the vendored effect-drizzle-pg, all PG sources) existed ONLY in stash@{0} ("pre-existing athena work — stashed before feat/fallback-models", created 13:27 for an unrelated effort that never materialized; working tree found CLEAN on dev) — one `git stash drop` from annihilation. WORSE than instance (1) the same day: `.opencode/db-migrations/` missing from the tree (untracked, never committed), recovered from `.bak` with sha256 verification (step9-evidence note 4; the instance Oracle's end-gate cited) — instance 1 had a backup; instance 2's "backup" WAS the hazard itself. Recovered via `git stash apply`; stash RETAINED as safety copy; 81 modified files on disk; Memo #18 Condition closures double-verified (stash blobs pre-restore + disk post-restore, zero drift) | commit the corpus NOW — Oracle Condition D (0000_init.sql + migrations + all Step 8/9 artifacts) ELEVATED by Memo #19 from blocking-for-PR-merge to IMMEDIATE, before any further work; standing discipline: never stash/branch-switch while uncommitted DB-domain work exists; commit at every green gate; retain the stash until the commit series merges, then clear manually — **NAMED Memo #19** — **THIRD EXPOSURE Memo #20 (lost-track-of-a-process extension)**: an ORPHANED council probe (left running ~98% CPU from Friday, untracked) pegged the machine; under load-46 contention task.test.ts read 36.5s — FALSE timeout readings attributed to the code under test; after the kill (PID 34661) the gates re-ran green (dialect-matrix 10/10 in 4.47s). Lessons: machine-load is an EVIDENCE-VALIDITY variable (the FM-36 environment-evidence class now covers stale installs AND contended machines); probes are ARTIFACTS — PID-tracked and cleaned like files, or they corrupt every timing measurement taken after them. Corpus since COMMITTED on dev (10c4d4e73b/8b67364f5a/5e1b40819a + 4cc9120443/e1a1f4e241/66410986ad); working tree clean; the annihilation exposure is retired | #19/#20 |
 | FM-38 | implicit timeout budgets on container-backed test legs (council-incident, NAMED Memo #20): bun test's default 5000ms produced 16/23 FALSE failures in the opencode-PG leg — ephemeral-container PG latency (cold pool, first-query planning, LISTEN setup) legitimately exceeds 5s with zero defect in the code under test; a healthy tree reads as regressed (inverse of FM-30's vacuous green: real code, false red) | timeout budgets must be EXPLICIT for container-backed test legs — pg-test.yml opencode-PG leg runs `bun test --timeout=30000` behind a LOAD-BEARING comment ("bun default 5000ms → 16/23 timeout-failures (council probe); never drop this flag", commit 4cc9120443); new container-backed suites inherit the flag + comment; any leg-wide timeout change requires FM-36 executed-evidence measured under verified machine load (FM-37 instance 3) | #20 |
+| FM-39 | env-gated module load crashes dialect no-op tests instead of skipping them (pre-existing, NAMED Memo #21): the wake-pg suite's SQLite no-op tests CRASH when TEST_DATABASE_URL is unset because the Wake module's PG import path is env-gated at module scope — an unset required env should SKIP a no-op leg, never crash it (mirror of pg-test.yml's job-level env discipline, missing at the suite level); dev-worktree proof (2026-08-31) shows the crash IDENTICAL on dev — present before the upstream merge, not merge-caused, not merge-worsened; the V3/V4/V5a adjudication (PRE-EXISTING via dev-worktree / FLAKY-UNDER-LOAD via isolation passes) already absorbed its failures | test-design defect, backlog fix: gate the no-op leg at the SUITE boundary on env presence (skip-when-unset); non-blocking for the upstream merge (the merge neither introduced nor worsened it); any future "crash on unset env" sighting reclassifies to this row | #21 |
 
 **VERDICT: APPROVE**
 
@@ -2943,3 +2944,90 @@ VERDICT: APPROVE — COUNCIL CLOSED, NOTHING BLOCKING
 **MEMO #20: CLOSED** (council discharged; conditions executed and verified).
 
 **MEMOS #1-#20: CLOSED** (Conditions D/C executed, B codified-as-law; residual = non-blocking backlog only).
+
+# PART 20 — UPSTREAM MERGE ADJUDICATION (MEMO #21): 192-COMMIT upstream/dev MERGE (22f7873b4b) ON upstream-sync + TEST-FIX 495108a2c2 — FROZEN DDL BYTE-IDENTICAL, ALL FIVE PG-MACHINERY FILES ZERO-DIFF, PLAN DB RULINGS HOLD AGAINST THE MERGED TREE; FM-39 NAMED (pre-existing wake-pg env-gate crash); FM-21/FM-28 MECHANICAL GUARDS' FIRST LIVE-FIRE PASS (192 COMMITS, ZERO REINTRODUCTIONS)
+
+Session 15 (Athena, Memo #21 — the upstream-merge DB-domain adjudication). Scope: the applied merge of upstream/dev `dc4449df0d` (192 commits, base `abd369e4cd`) as `22f7873b4b` plus the follow-up test-fix `495108a2c2` on branch `upstream-sync`, against my six-lens charter (frozen DDL, dual-dialect dispatch, Database.Schema seam, PG machinery, upstream DB-adjacent changes, projector resolution). Plan of record: `.omo/plans/oc-upstream-update.md` (Oracle design, Momus-approved). Every claim below was executed by me this session (2026-08-31) on the merged tree — git log/diff against `abd369e4cd`, sha256, greps, file reads — none inherited from the orchestrator's narrative. File was 2946 lines pre-append (2945 + the FM-39 row landed ahead of this narrative; row + PART form one atomic record, the Memo #20 discipline).
+
+## 21.1 — Merge under review (recorded)
+
+| Item | Value |
+|---|---|
+| Branch | `upstream-sync`: `495108a2c2` (test fix, +3/−1) → `22f7873b4b` (merge) → base `abd369e4cd` (dev tip, Memo #20 discharge) |
+| Merged | upstream/dev `dc4449df0d`, 192 commits |
+| Total branch delta | 400 files, +19449/−5821 (git diff abd369e4cd..upstream-sync) |
+| DB-domain delta | THREE files only: `migration.ts` (runtime, upstream), `migration/20260410174513_workspace-name.ts` (upstream), `session/projector.ts` (resolution, 4 lines) — see §21.2 |
+| Follow-up | `495108a2c2`: 3 merge-caused task.test.ts failures (two B1 config attachments + one error-format assertion) → SQLite 25/25, PG targets green |
+
+## 21.2 — Six-lens verification (all EXECUTED this session)
+
+1. **Frozen DDL — PASS, BYTE-IDENTICAL.** `shasum -a 256 .opencode/db-migrations/0000_init.sql` on the merged tree = `818ee1a9bd75a8cfeeef32fc426e288108e69b5e5fb4360d876bf6ffef422fb3` — equals the locked constant (plan invariant 6; V8). The 192 commits contain zero edits to `.opencode/db-migrations/` (diff-stat on the path is empty).
+2. **Dual-dialect dispatch — PASS, ZERO-DIFF.** `packages/core/src/database/database.ts` is byte-identical through the merge; `databaseUrl = process.env.DATABASE_URL || undefined` stands at :42 under the decision-#8 comment, single-source, `isPg` the only branch truth. No upstream change re-introduced env-truth ambiguity — the FM-28 class had no surface to re-enter (file untouched).
+3. **Database.Schema seam — PASS, GUARD INTACT.** `packages/core/test/grep-guard.test.ts` and `.github/workflows/pg-test.yml` both ZERO-DIFF through the merge. My independent app-layer sweep of `packages/opencode/src/**` for `/sql/` imports finds exactly one hit: `cli/cmd/db.ts:27` `import type { SqlClient }` — a TYPE import (explicitly allowed by the guard's `import type` convention, Memo #17 Cond 3), in a file authored by OUR `10c4d4e73b` (pre-merge provenance, git-verified). No new direct table-object or star imports entered the app layer across 192 commits. V6's green is corroborated, not just cited.
+4. **PG machinery — PASS, ALL FOUR ZERO-DIFF.** `flush.ts` (two-tier commit), `wake.ts` (NOTIFY/LISTEN), `session/input.ts` (SKIP LOCKED arbitration), `migration.pg.ts` (runner) — plus `database.ts` — all byte-identical from `abd369e4cd` to `upstream-sync`. The merge's entire DB-domain footprint is the three files in §21.1. V5b's 54/0 on ephemeral postgres:17-alpine (six suites: database-pg, flush-pg, wake-pg, wake-receive-pg, session-pg-roundtrip, dialect-matrix) executed on exactly this machinery.
+5. **Upstream DB-adjacent changes — PASS, PLAN RULINGS HOLD.** (a) `migration.ts`: upstream's legacy `__drizzle_migrations` adoption fix (`pragma_table_info` name-column detection; `created_at` → strftime-prefix lookup with `Effect.die` on unmatched timestamp) lives ENTIRELY inside the `sqlite_master`-guarded SQLite path; the PG runner is a separate file, untouched. "Take as-is" stands. (b) `workspace-name.ts`: upstream added a `PRAGMA table_info` defensive select (`name` column vs `''`) for legacy SQLite DBs — PG init already creates `"workspace"."name" text NOT NULL DEFAULT ''` (0000_init.sql :66), final shape covered; "No PG port needed" stands. (c) SCOPE NOTE (new, mine): the merge also brought `packages/stats/core/migrations/20260826000000_model_retention` and `packages/console/core/migrations/{flashy_arclight,oval_morlocks}` — upstream PACKAGE-LOCAL databases for the stats/console services, outside the opencode-pg dual-dialect backend (no `databaseUrl` dispatch, no `.opencode/db-migrations` membership). Not a gap; recorded so the next reviewer does not re-litigate.
+6. **projector.ts resolution — PASS, MEMO #11-ERA GUARANTEES PRESERVED.** The 4-line diff is exactly the plan's disposition: import swap `SessionContextEpoch` → named `MessageTable/PartTable/SessionInputTable/SessionMessageTable/SessionTable` from `./sql`, and the two `SessionContextEpoch.reset(db, schema, …)` call sites deleted (upstream semantic adopted). The schema-threaded body survives intact (`schema.SessionTable` et al. at :147+; `SchemaTables` typing at :82). `context-epoch.ts` survives with 6 exports; `SessionContextEpochTable` survives in `schema.pg.ts` :27/:45, both namespace files, and the frozen DDL (`session_context_epoch`, 0000_init.sql :187-192); `history.ts` still reads `baseline_seq` (:113-115). Deletion of the explicit resets is HYGIENIC under PG: the epoch row is `REFERENCES "session"("id") ON DELETE CASCADE` (:188), so the projector's session-row delete cascade-cleans the epoch — upstream's semantic is not merely tolerable but mechanically covered by my DDL. `reset()` now has zero callers — matching upstream's own retained-export state; plan ruled "Do NOT delete the function" (llm.ts still calls `initialize`/`prepare`); recorded as §21.5 debt-note.
+
+## 21.3 — Battery + execution deviations (recorded; not re-adjudicated, corroborated)
+
+Battery as reported and spot-reconciled: V1/V2/V6/V8/V9/V10 PASS; V5b 54/0 (six PG suites, ephemeral postgres:17-alpine); V3/V4/V5a fully adjudicated — PRE-EXISTING via dev-worktree proof, FLAKY-UNDER-LOAD via isolation passes; the wake-pg crash-on-unset-env among them is FM-39's subject (§21.4). The 3 merge-caused task.test.ts failures were fixed at `495108a2c2` (two B1 config attachments + one error-format assertion) → SQLite 25/25, PG targets green. **Execution deviations, ACCEPTED for the record:** (i) the work split across 3 sessions by model outages — FM-36's authored-vs-executed discipline was honored by the final session's reconciliation; (ii) the merge was COMMITTED before battery completion — justified: conflict work preserved on an isolated branch is the FM-37 lesson applied forward (never leave solved-conflict work uncommitted), the battery completed after, and the defects surfaced as a follow-up commit rather than a rebase. The gate is the BRANCH state, not the commit order.
+
+## 21.4 — FM ledger actions
+
+- **FM-39 NAMED** (row appended ahead of this narrative): env-gated module load crashes dialect no-op tests instead of skipping them — the wake-pg SQLite no-op tests crash when TEST_DATABASE_URL is unset because the Wake module import is env-gated at module scope. Classification: test-design defect; env-gated module load; present on dev (dev-worktree proof); non-merge-caused; backlog fix. The V3/V4/V5a adjudications already absorbed its failures.
+- **FM-21 / FM-28 guards: FIRST LIVE-FIRE PASS.** The mechanical guards (grep-walker + CI leg for FM-21; `|| undefined` normalization for FM-28) held through a 192-commit upstream merge with zero reintroductions — the first proof they work against the adversary they were built for (upstream drift), not just against ourselves. No row edits: both rows stand closed as of Memo #20; this is the post-closure field report.
+
+## 21.5 — Residuals (non-blocking backlog)
+
+| Item | Note |
+|---|---|
+| FM-39 suite-boundary skip | gate wake-pg no-op leg on env presence (skip-when-unset); backlog |
+| `SessionContextEpoch.reset` dead export | zero callers post-adoption, matches upstream; retained per plan ruling (llm.ts uses `initialize`/`prepare`); divergence-tracking note only |
+| stats/console package-local migrations | out of backend scope (§21.2 lens 5c); re-review only if those packages ever consume `DATABASE_URL` |
+
+None blocking; none carries a condition.
+
+## 21.6 — Decision memo
+
+```
+DECISION MEMO #21 — UPSTREAM MERGE ADJUDICATION: 192-COMMIT upstream/dev MERGE (22f7873b4b + FIX 495108a2c2) REVIEWED ACROSS ALL SIX DB LENSES — FROZEN DDL BYTE-IDENTICAL (sha256 constant), ALL FIVE PG-MACHINERY FILES ZERO-DIFF, DUAL-DIALECT SINGLE-SOURCE INTACT, GUARD UNTOUCHED AND CORROBORATED, PLAN DB RULINGS HOLD (workspace-name NO-PORT; migration.ts TAKE-AS-IS; projector ADOPT-UPSTREAM with CASCADE covering the reset deletion); FM-39 NAMED (pre-existing, non-merge); FM-21/FM-28 GUARDS' FIRST LIVE-FIRE PASS; MERGE IS FIT FOR dev
+STATUS: APPROVED (DB-DOMAIN SEAT, COUNCIL GATE)
+TRIGGER: council review of applied upstream merge (plan oc-upstream-update.md)
+VERDICT: APPROVE — MERGE IS FIT FOR dev
+```
+
+**Ruling 1 — PG-backend invariance CONFIRMED, not assumed.** The merge's entire DB-domain footprint is three files (§21.1); every file I own — DDL, dispatch, flush, wake, input arbitration, PG migration runner, guard, CI workflow — is byte-identical from `abd369e4cd` to `upstream-sync`, verified by diff, not by the merge's conflict absence. V5b 54/0 executed on precisely this surface.
+
+**Ruling 2 — Plan DB rulings HOLD against the merged tree** (§21.2 lens 5): workspace-name needs no PG port (init :66 covers final shape), migration.ts runtime change is SQLite-path-contained, and the projector resolution preserves the Memo #11-era guarantees (schema-threading intact, epoch table+exports+read-path survive, ON DELETE CASCADE mechanically covers the adopted reset-deletion). The stats/console migrations are a scope note, not a gap.
+
+**Ruling 3 — Execution deviations ACCEPTED** (§21.3): merge-before-battery was FM-37's lesson applied (preserve solved-conflict work on an isolated branch), with defects fixed as a follow-up commit and the battery completed after; the 3-session split is outage survival, consistent with FM-36's authored-vs-executed reconciliation duty.
+
+**INVARIANTS** (post-merge state)
+
+- Frozen DDL byte-identity, no second copy of 0000_init — **PASS** (sha256 verified on the merged tree, this session).
+- Dual-dialect single-source; `|| undefined`; unset = SQLite untouched — **PASS, ZERO-DIFF** (database.ts untouched by 192 commits).
+- App-layer Database.Schema seam + mechanical guard — **PASS** (guard/CI zero-diff; independent sweep: one pre-existing allowed `import type` hit, our own provenance; V6 green).
+- Two-tier commit, NOTIFY/LISTEN, SKIP LOCKED, migration runner — **PASS, UNTOUCHED** (all zero-diff; V5b 54/0).
+- Memo #11-era projection guarantees — **PASS** (§21.2 lens 6).
+- Event partitioning, session_input predicate+backstop, history pagination index, migration advisory-lock/journal-in-tx, synchronous_commit total ban, checkpoint fence, V2 semantics — **PASS, UNTOUCHED** (zero production-tx or schema change in the merge's DB-domain delta).
+
+**DURABLE-vs-DERIVED:** the merge is DURABLE — committed on `upstream-sync` (`22f7873b4b` + `495108a2c2`); the council gate merges it to dev. Nothing DB-domain exists only in a stash or working tree.
+
+**TRANSACTION SEMANTICS:** none changed. The one upstream runtime change in my domain (migration.ts legacy adoption) executes only on the SQLite journal path inside the `sqlite_master` guard; PG transactions, isolation, and commit discipline are byte-identical.
+
+**FAILURE-MODES-UPDATED:** yes — one action: FM-39 NAMED (§21.4). Plus the recorded field-report: FM-21/FM-28 guards passed first live fire.
+
+**CONDITIONS:** none new. Residual = §21.5 backlog, non-blocking.
+
+**UNVERIFIED**
+
+1. UNVERIFIED: first real-PR observation of pg-test.yml on a GitHub runner against the POST-MERGE tree (carried U-2 lineage; the merge did touch sibling workflows — beta.yml removed, unlock.yml added — though pg-test.yml itself is zero-diff). Cheapest resolve: the first PR.
+2. UNVERIFIED: the stats/console package-local migrations were scope-adjudicated by path-and-consumer analysis only (no DATABASE_URL consumer found); if either package ever grows one, that is a new review, not an extension of this approval.
+
+**ORACLE-COUNTER-SIGN:** not required — adjudication/record only: no baseline change (hash constant), no schema change, no new dependency in the PG path, no V2 change. DUAL-KEY: Oracle designed the merge plan (Momus-approved); this memo supplies the DB-domain APPROVE the council gate requires.
+
+**Effort:** none owed. Backlog: §21.5 (three items, Shorts).
+
+**VERDICT: APPROVE — MERGE IS FIT FOR dev**
+
+**MEMO #21: CLOSED** (merge adjudicated; FM-39 named; guards' live-fire pass recorded).
