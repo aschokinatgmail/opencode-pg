@@ -359,6 +359,7 @@ describe("tool.task", () => {
       if (!(failure instanceof Error)) throw new Error("expected Error defect")
       expect(failure.message).toBe(`Subagent failed (task_id: ${child?.id}): Network connection lost`)
     }),
+    { config: providerCfg },
   )
 
   it.instance("execute surfaces terminal child tool errors with a resumable task_id", () =>
@@ -403,6 +404,7 @@ describe("tool.task", () => {
         `Subagent failed (task_id: ${child?.id}): The user rejected permission to use this specific tool call.`,
       )
     }),
+    { config: providerCfg },
   )
 
   it.instance("execute asks by default and skips checks when bypassed", () =>
@@ -1244,7 +1246,7 @@ describe("tool.task", () => {
       expect(Exit.isFailure(exit)).toBe(true)
       if (Exit.isFailure(exit)) {
         const message = String(Cause.squash(exit.cause))
-        expect(message).toContain("Subagent task failed (session ")
+        expect(message).toContain("Subagent failed (task_id: ")
         expect(message).toContain("provider blew up")
       }
       // child session WAS created (B1 passed, model resolved), but the task failed
