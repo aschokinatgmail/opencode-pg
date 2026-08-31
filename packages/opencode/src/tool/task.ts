@@ -16,7 +16,6 @@ import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
 import { DatabaseSchema } from "@/storage/db-schema"
-import { errorMessage } from "@/util/error"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -240,16 +239,21 @@ export const TaskTool = Tool.define(
           parts,
         })
         // B3: surface subagent provider errors as a tool failure. No auto-retry.
+        // AR2: childState "failed" metadata rides the existing ctx.metadata PartUpdated path.
         if (result.info.role === "assistant" && result.info.error) {
           yield* ctx.metadata({
             title: params.description,
             metadata: { ...metadata, childState: "failed" as const },
           })
-          return yield* Effect.fail(
-            new Error(
-              `Subagent task failed (session ${nextSession.id}): ${errorMessage(result.info.error)}`,
-            ),
-          )
+          const message =
+            "message" in result.info.error.data && typeof result.info.error.data.message === "string"
+              ? result.info.error.data.message
+              : result.info.error.name
+          return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${message}`))
+        }
+        const failed = result.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
+        if (failed?.type === "tool" && failed.state.status === "error") {
+          return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
         }
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
       })

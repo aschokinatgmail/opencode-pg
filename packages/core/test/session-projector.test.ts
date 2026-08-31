@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { DateTime, Effect, Layer, Schema } from "effect"
-import { asc, eq } from "drizzle-orm"
+import { asc, eq, sql } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import * as DatabaseSchema from "@opencode-ai/core/database/schema.pg"
 import * as SchemaSqliteNamespace from "@opencode-ai/core/schema-sqlite-namespace"
@@ -34,6 +34,7 @@ import { SystemContext } from "@opencode-ai/core/system-context"
 import { SessionV1 } from "@opencode-ai/schema/session-v1"
 import { testEffect } from "./lib/effect"
 import { Snapshot } from "@opencode-ai/core/snapshot"
+import { Location } from "@opencode-ai/core/location"
 
 const it = testEffect(
   Layer.merge(
@@ -83,6 +84,39 @@ const stepFinishPart = (
 })
 
 describe("SessionProjector", () => {
+  it.effect("projects moved sessions without the transitional context epoch table", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "test",
+          directory: "/project",
+          title: "test",
+          version: "test",
+        })
+        .run()
+      yield* db.run(sql`DROP TABLE session_context_epoch`)
+
+      yield* events.publish(SessionEvent.Moved, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(1),
+        location: Location.Ref.make({ directory: AbsolutePath.make("/project/subdir") }),
+      })
+
+      expect(yield* db.select({ directory: SessionTable.directory }).from(SessionTable).get()).toEqual({
+        directory: "/project/subdir",
+      })
+    }),
+  )
+
   it.effect("projects staged, cleared, and committed reverts", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
