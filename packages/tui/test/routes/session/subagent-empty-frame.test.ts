@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { emptySubagentFrame } from "../../../src/routes/session/subagent-empty-frame"
 import { errorMessage } from "../../../src/util/error"
-import type { Session, Message } from "@opencode-ai/sdk/v2"
+import type { Session, Message, AssistantMessage } from "@opencode-ai/sdk/v2"
 
 function session(overrides: Partial<Session> = {}): Session {
   return {
@@ -62,11 +62,21 @@ describe("AR1 emptySubagentFrame", () => {
   // produce a non-blank string — the error is rendered, not blank.
   test("non-orphan subagent with persisted assistant error: frame undefined, errorMessage non-blank", () => {
     const s = session({ parentID: "ses_parent", agent: "general" })
-    const assistantWithError = {
+    const assistantWithError: AssistantMessage = {
       id: "m_err",
+      sessionID: "ses_1",
       role: "assistant",
-      error: { name: "APIError", message: "provider blew up" },
-    } as Message
+      time: { created: 0 },
+      error: { name: "APIError", data: { message: "provider blew up", isRetryable: false } },
+      parentID: "ses_parent",
+      modelID: "test-model",
+      providerID: "test",
+      mode: "",
+      agent: "general",
+      path: { cwd: "/tmp", root: "/tmp" },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    }
 
     // Non-orphan: messages present → emptySubagentFrame returns undefined
     // (the normal render path renders the error, not the empty frame).
